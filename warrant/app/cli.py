@@ -1,5 +1,9 @@
-"""Command-line interface.
+"""Command-line interface for assurance and experimental research demos.
 
+    warrant init .
+    warrant validate . --format markdown --output warrant-report.md
+
+Experimental legacy commands:
     warrant brief --youtube "Last Week in AI"
     warrant brief --arxiv-id 2603.26993
     warrant brief --arxiv-id 2603.26993 --ungoverned   # naive baseline
@@ -10,8 +14,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
+from warrant.assurance.engine import ValidationEngine
+from warrant.assurance.models import Verdict
+from warrant.assurance.policy import PolicyError, load_policy, write_starter_policy
+from warrant.assurance.render import render_json, render_markdown, render_terminal
+from warrant.assurance.source import materialize_source
 from warrant.config import get_settings
+from warrant.exceptions import WarrantError
 from warrant.logging_setup import configure_logging
 from warrant.schemas.tasks import BriefRequest
 
@@ -74,22 +85,93 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    try:
+        target = write_starter_policy(args.path)
+    except PolicyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Created {target}")
+    return 0
+
+
+def _render_report(report, format_name: str) -> str:
+    if format_name == "json":
+        return render_json(report)
+    if format_name == "markdown":
+        return render_markdown(report)
+    return render_terminal(report)
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    try:
+        with materialize_source(args.source) as (root, label):
+            policy_path = Path(args.policy)
+            if not policy_path.is_absolute():
+                policy_path = root / policy_path
+            policy, digest = load_policy(policy_path)
+            if args.allow_exec:
+                print(
+                    "WARNING: executing commands declared by a trusted repository. "
+                    "Warrant does not provide an operating-system security sandbox.",
+                    file=sys.stderr,
+                )
+            report = ValidationEngine().validate(
+                root,
+                policy,
+                digest,
+                allow_exec=args.allow_exec,
+                repository_label=label,
+            )
+    except (WarrantError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    rendered = _render_report(report, args.format)
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered + "\n", encoding="utf-8")
+        print(f"Written to {output}")
+    else:
+        print(rendered)
+    return {
+        Verdict.PASS: 0,
+        Verdict.FAIL: 1,
+        Verdict.INDETERMINATE: 2,
+    }[report.verdict]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant",
-                                     description="Delegation-economics orchestrator.")
+                                     description="Evidence-based software assurance.")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("init", help="create a starter warrant.yml policy")
+    p_init.add_argument("path", nargs="?", default=".")
+    p_init.set_defaults(func=cmd_init)
+
+    p_validate = sub.add_parser("validate", help="validate a local or public GitHub repository")
+    p_validate.add_argument("source", nargs="?", default=".")
+    p_validate.add_argument("--policy", default="warrant.yml")
+    p_validate.add_argument("--format", choices=("terminal", "json", "markdown"),
+                            default="terminal")
+    p_validate.add_argument("--output", default=None)
+    p_validate.add_argument("--allow-exec", action="store_true",
+                            help="run policy-declared commands in this trusted repository")
+    p_validate.set_defaults(func=cmd_validate)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--arxiv-id", dest="arxiv_id", default=None)
     common.add_argument("--query", dest="query", default=None)
     common.add_argument("--youtube", dest="youtube", default=None)
 
-    p_brief = sub.add_parser("brief", parents=[common], help="produce a technical briefing")
+    p_brief = sub.add_parser("brief", parents=[common], help="experimental legacy: produce a technical briefing")
     p_brief.add_argument("--ungoverned", action="store_true",
                          help="run the naive pipeline with the admissibility gate disabled")
     p_brief.set_defaults(func=cmd_brief)
 
-    p_probe = sub.add_parser("probe", parents=[common], help="run the Delegation Ledger probe")
+    p_probe = sub.add_parser("probe", parents=[common], help="experimental legacy: run the Delegation Ledger probe")
     p_probe.set_defaults(func=cmd_probe)
     return parser
 
