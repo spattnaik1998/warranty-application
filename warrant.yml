@@ -1,0 +1,24 @@
+version: "1"
+project:
+  name: warrant
+  version: 1.0.0
+  repository: https://github.com/spattnaik1998/warranty-application
+claims:
+  - id: project-files
+    type: files
+    paths:
+      - README.md
+      - pyproject.toml
+      - SECURITY.md
+  - id: mit-license
+    type: license
+    license: MIT
+  - id: tests
+    type: tests
+  - id: continuous-integration
+    type: ci
+  - id: coverage
+    type: coverage
+    minimum: 80
+    report: coverage.xml
+    required: false

@@ -1,0 +1,25 @@
+version: "1"
+project:
+  name: example-python-service
+claims:
+  - id: project-files
+    type: files
+    paths:
+      - README.md
+      - pyproject.toml
+  - id: license
+    type: license
+    license: MIT
+  - id: tests
+    type: tests
+  - id: coverage
+    type: coverage
+    minimum: 80
+    report: coverage.xml
+  - id: continuous-integration
+    type: ci
+    required: false
+  - id: dependency-audit
+    type: dependency_vulnerabilities
+    requirements: requirements.txt
+    required: false
