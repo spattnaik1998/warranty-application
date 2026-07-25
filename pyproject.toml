@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warrant"
+version = "0.1.0"
+description = "A delegation-economics orchestrator: every sub-agent must earn a warrant by injecting new exogenous signal."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Sarthak" }]
+dependencies = [
+    "pydantic>=2.6",
+    "anthropic>=0.40",
+    "openai>=1.40",
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+    "arxiv>=2.1",
+    "pypdf>=4.0",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "numpy>=1.26",
+    "matplotlib>=3.8",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-mock>=3.12"]
+
+[project.scripts]
+warrant = "warrant.app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["warrant*"]
+
+[tool.pytest.ini_options]
+testpaths = ["warrant/tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore:The default value of `allowed_objects`",
+]
