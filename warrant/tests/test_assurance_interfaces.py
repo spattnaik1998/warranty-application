@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 from warrant.app.api import app
 from warrant.app.cli import main
 
-
 STATIC_POLICY = """\
 version: "1"
 project:
