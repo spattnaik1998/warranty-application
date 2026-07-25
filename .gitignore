@@ -7,3 +7,11 @@ out/
 *.egg-info/
 .pytest_cache/
 .DS_Store
+
+.coverage
+coverage.xml
+coverage.json
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+warrant-report.*
