@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from warrant.assurance.models import ValidationReport, Verdict
 
-
 _MARKS = {
     Verdict.PASS: "PASS",
     Verdict.FAIL: "FAIL",
