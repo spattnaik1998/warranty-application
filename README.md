@@ -40,6 +40,13 @@ warrant validate ./trusted-project --allow-exec
 
 This permission guard is not an operating-system sandbox.
 
+## Prototype testing
+
+Engineers evaluating Warrant before release should follow the
+[prototype testing guide](docs/prototype-testing-guide.md). It includes a clean
+environment setup, pass/fail/indeterminate scenarios, CLI and API safety tests,
+expected outcomes, troubleshooting, and a standard feedback template.
+
 ## Policy
 
 A minimal `warrant.yml`:
