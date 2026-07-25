@@ -1,127 +1,120 @@
-# Warrant — a delegation-economics orchestrator
+# Warrant
 
-> Every sub-agent must earn a **warrant** to exist: it is admitted into the
-> multi-agent network only if it injects a **new exogenous signal** (a tool
-> output, a retrieval, an environment observation) or performs a
-> **non-redundant external check**. Delegations that merely reorganize evidence
-> already in the shared belief state are rejected or *collapsed* into a single
-> call.
+Warrant is an open-source, evidence-based software-assurance validator for
+Python repositories. A project declares verifiable claims in `warrant.yml`;
+Warrant inspects the source, records content-addressed evidence, and returns an
+authoritative `pass`, `fail`, or `indeterminate` verdict.
 
-Most multi-agent demos add a planner, a critic, and a reviewer and hope the
-system gets better. **On the Reliability Limits of LLM-Based Multi-Agent
-Planning** (Ao, Gao & Simchi-Levi, [arXiv:2603.26993](https://arxiv.org/abs/2603.26993))
-proves the opposite: *without new exogenous signals, any delegated network is
-decision-theoretically dominated by a single centralized Bayes decision-maker
-with the same information* — extra hops only add **posterior distortion** (the
-telephone game). Empirically the paper watches accuracy fall from 90.7% to 22.5%
-over five empty relay stages, with the KL divergence between agent posteriors
-predicting the accuracy drop at r≈0.72.
-
-Warrant is the runtime that takes that theorem seriously. It orchestrates a real
-task — reading an AI paper and writing a technical briefing — and refuses to
-spin up an agent that can't pay for itself in information, while instrumenting
-every hop so you can *prove* the multi-agent structure is earning its keep.
-
----
-
-## What it does
-
-1. **Two-move governed orchestrator (LangGraph).** An Anthropic orchestrator may
-   only `Delegate(Φ)` or `Finish(y)`; it never touches a tool directly
-   (`Φ = (Instruction, Context, Tools, Model)`, after AOrchestra).
-2. **The Admissibility Gate.** Every proposed delegation is classified —
-   `INJECTOR` (new external signal → admit), `VALIDATOR` (non-redundant external
-   check → admit), or `REORGANIZER` (only re-reads context → **collapse into the
-   orchestrator**). The decision is *structural* (from tool tags — no prompt can
-   fake a signal) and *economic* (a delegation type whose observations never move
-   the posterior is pruned).
-3. **Posterior-preserving interface.** Hops carry typed posteriors, not prose —
-   the paper's structured-message format that degrades ~2.8 pts/stage instead of
-   ~8.5.
-4. **Risk-triggered escalation (Theorem 10).** Claims are flagged for human
-   review when terminal posterior risk `R_a(H)` exceeds review cost `R_h(H)` —
-   never by step count.
-5. **Grounding + gray-error guards.** No claim without an evidence reference; every
-   quoted figure is checked against the source (catching silent semantic errors).
-6. **The Delegation Ledger.** A probe that runs the task under matched conditions
-   and reproduces the paper's plots **on your own pipeline**.
-
-## Architecture
-
-```
-warrant/
-  config/         settings.py          env-driven, fail-fast config
-  schemas/        belief.py tasks.py ledger.py   Pydantic contracts (Posterior, Delegation Φ, ...)
-  providers/      anthropic_ / openai_ / base    adapters + posterior elicitation + deterministic mock
-  tools/          registry.py + tools            exogenous/validator/transform tagging
-  belief/         state.py distortion.py         belief state + KL/Brier posterior distortion
-  gate/           admissibility.py novelty_audit.py   the two-layer gate + delegation economics
-  orchestrator/   graph.py executor.py escalation.py  LangGraph two-move loop
-  pipeline/       steps.py brief_pipeline.py     the AI-paper -> briefing domain
-  ledger/         probe.py metrics.py report.py  matched conditions + reproduced plots
-  app/            cli.py api.py                   CLI + FastAPI
-  tests/                                          schema, gate, distortion, smoke
-```
+Deterministic checks control the verdict. Warrant's original multi-agent
+reliability research remains available as an experimental demo, but model output
+cannot turn missing or failed evidence into a pass.
 
 ## Quickstart
 
 ```bash
-pip install -r requirements.txt          # deps (pydantic, langgraph, anthropic, openai, ...)
-cp .env.example .env                     # runs in mock mode by default (WARRANT_MOCK=1)
+git clone https://github.com/spattnaik1998/warranty-application.git
+cd warranty-application
+python -m venv .venv
+# Linux/macOS: source .venv/bin/activate
+# Windows: .venv\Scripts\activate
+python -m pip install -e ".[dev]"
 
-# Produce a governed briefing (offline, deterministic):
-python -m warrant.app.cli brief --arxiv-id 2603.26993
-python -m warrant.app.cli brief --youtube "Last Week in AI"
-
-# Run the naive (ungoverned) baseline for contrast:
-python -m warrant.app.cli brief --arxiv-id 2603.26993 --ungoverned
-
-# Run the Delegation Ledger probe (writes out/ledger_report.md + PNG plots):
-python -m warrant.app.cli probe
-
-# Or the API:
-uvicorn warrant.app.api:app --reload     # POST /brief, POST /probe, GET /ledger
+warrant init ./my-project
+warrant validate ./my-project
+warrant validate ./my-project --format json
+warrant validate ./my-project --format markdown --output warrant-report.md
 ```
 
-**Live mode:** set `WARRANT_MOCK=0` and provide `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
-The mock provider makes the whole system — and CI — run offline: posterior
-confidence tracks the presence of exogenous evidence in context, which is exactly
-what reproduces the telephone game without a network.
-
-## Results — the Delegation Ledger reproduces the paper
-
-Running `warrant probe` on our own pipeline (mock mode):
-
-| Condition | Accuracy | Comm. loss | Delegations |
-|---|---:|---:|---|
-| **A** centralized (all evidence, one call) | 1.000 | 0.000 | — |
-| **B** governed (admissibility-gated) | 1.000 | 0.000 | 8 admitted, 1 collapsed |
-| **B-** naive prose relay (gate off) | 0.667 | 2.456 | telephone game |
-| **C** signal-starved (retrieval removed) | 0.833 | 1.475 | signal never enters |
-
-- **KL ↔ accuracy-drop correlation: r ≈ 0.97** (paper: r≈0.72).
-- **Prose relay degrades ~6.7 pts/stage; the posterior interface ~0** (paper: 8.5 vs 2.8).
-- The governed network matches the centralized upper bound while the naive relay
-  collapses — extra agents without new signal *only* added distortion.
-
-Figures written to `out/`: `accuracy_vs_depth.png`, `kl_vs_accuracy_drop.png`,
-`accuracy_by_condition.png`.
-
-## Design lineage
-
-Warrant is built from the reliability corpus it briefs:
-the two-move orchestrator (AOrchestra), the decision-theoretic gate and
-posterior distortion (Reliability Limits, arXiv:2603.26993), the
-"no assertion without grounding" rule (AgentLTL), and the silent-failure /
-gray-error framing (MAESTRO). The demo workload is recursively fitting: the
-system reads multi-agent-reliability papers and is itself governed by the
-reliability engineering those papers prescribe.
-
-## Testing
+Validate a public GitHub repository by HTTPS URL:
 
 ```bash
-python -m pytest -q      # 24 tests: posterior math, gate classification, distortion, smoke + ledger acceptance
+warrant validate https://github.com/owner/repository
 ```
 
-The smoke tests assert the ledger's acceptance criteria: governed ≈ centralized,
-naive < governed, signal-starved < governed, and r > 0.5.
+Commands declared by a repository are never run by default. For a repository
+you trust:
+
+```bash
+warrant validate ./trusted-project --allow-exec
+```
+
+This permission guard is not an operating-system sandbox.
+
+## Policy
+
+A minimal `warrant.yml`:
+
+```yaml
+version: "1"
+project:
+  name: example-service
+claims:
+  - id: required-files
+    type: files
+    paths: [README.md, pyproject.toml]
+  - id: license
+    type: license
+    license: MIT
+  - id: tests
+    type: tests
+  - id: coverage
+    type: coverage
+    minimum: 80
+    report: coverage.xml
+    required: false
+```
+
+V1 supports required files, SPDX license detection, Python test discovery and
+opt-in execution, Coverage.py XML/JSON reports, GitHub Actions discovery,
+`pip-audit` dependency checks, and guarded command arrays. See
+[the policy reference](docs/policy-reference.md) and the
+[complete example](examples/python/warrant.yml).
+
+## Verdicts
+
+- `pass`: every required claim is supported.
+- `fail`: available evidence disproves at least one required claim.
+- `indeterminate`: no required claim failed, but required evidence was missing,
+  inaccessible, invalid, timed out, or not permitted to run.
+- Advisory claims produce warnings without changing the overall verdict.
+
+Each claim result links to immutable evidence with a locator, SHA-256 digest,
+timestamp, observation, and failure reason. JSON is schema-versioned for CI use;
+terminal and Markdown formats make the same evidence readable by people.
+
+CLI exit codes are `0` for pass, `1` for fail, and `2` for indeterminate or
+invalid input.
+
+## FastAPI
+
+```bash
+uvicorn warrant.app.api:app --reload
+```
+
+Open `http://127.0.0.1:8000/docs` and submit a ZIP source archive to
+`POST /v1/validations`. Uploads are bounded and checked for traversal,
+symbolic links, expansion size, and file count. API policies containing
+executable claims are rejected; uploaded code is never executed.
+
+## Development
+
+```bash
+python -m pytest --cov=warrant --cov-fail-under=80
+python -m ruff check warrant/assurance warrant/app warrant/tests
+```
+
+CI tests Python 3.11–3.13 on Linux and Windows and runs linting, dependency
+auditing, and CodeQL. See [architecture](docs/architecture.md),
+[contributing](CONTRIBUTING.md), and [security](SECURITY.md).
+
+## Experimental reliability demo
+
+The original delegation-economics orchestrator and Delegation Ledger remain
+available through the legacy `warrant brief` and `warrant probe` commands and
+under `/experimental/*` API routes. These demonstrate posterior-preserving
+multi-agent delegation and do not participate in authoritative software
+assurance verdicts.
+
+## License
+
+[MIT](LICENSE)
