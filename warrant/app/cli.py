@@ -74,10 +74,55 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Run a bundled example graph and emit a delegation audit."""
+    import warrant
+
+    if args.example == "dogfood":
+        from examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
+        from warrant.schemas.tasks import BriefRequest
+
+        warrant.reset()
+        app = warrant.instrument(
+            build_brief_graph(), node_tools=NODE_TOOLS, build_graph=build_brief_graph,
+            graph_name="warrant-briefing", output_key="markdown",
+        )
+        inputs = [{"request": BriefRequest(arxiv_id="2603.26993")},
+                  {"request": BriefRequest(youtube_channel="Last Week in AI")}]
+    else:
+        from examples.research_graph import NODE_TOOLS, build_research_graph
+
+        warrant.reset()
+        app = warrant.instrument(
+            build_research_graph(), node_tools=NODE_TOOLS, tools={"arxiv": "INJECTOR"},
+            build_graph=build_research_graph, graph_name="research-assistant", output_key="draft",
+        )
+        inputs = [{"topic": t} for t in
+                  ("kv-cache compression", "mixture-of-experts routing", "speculative decoding")]
+
+    with warrant.session():
+        for inp in inputs:
+            app.invoke(inp)
+        report = warrant.audit()
+
+    print(report.to_cli())
+    out = get_settings().output_dir
+    html_path = out / f"{args.example}_audit.html"
+    report.to_html(str(html_path))
+    report.to_json_file(str(out / f"{args.example}_audit.json"))
+    print(f"\nHTML report written to {html_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant",
-                                     description="Delegation-economics orchestrator.")
+                                     description="Delegation-economics SDK for multi-agent systems.")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_audit = sub.add_parser("audit", help="audit a bundled example graph and write a report")
+    p_audit.add_argument("--example", choices=["research", "dogfood"], default="research",
+                         help="which bundled graph to audit (default: research)")
+    p_audit.set_defaults(func=cmd_audit)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--arxiv-id", dest="arxiv_id", default=None)

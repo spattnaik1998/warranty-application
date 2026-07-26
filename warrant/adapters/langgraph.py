@@ -201,12 +201,13 @@ class InstrumentedApp:
         run.finalize(self._final_output(final_state))
         log_event(
             log,
-            "run recorded",
+            "run recorded" if record else "replay complete",
             stage="adapter.run",
             graph=self.graph_name,
             status="ok",
             nodes=len(run.nodes),
             tokens=run.total_tokens,
+            recorded=record,
         )
         if record:
             self._store.add(run)

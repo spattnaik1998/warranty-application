@@ -64,7 +64,12 @@ def ablate_node(app: Any, node_id: str, baseline_by_run: dict[str, str]) -> Abla
         if baseline is None:
             continue
         n += 1
-        ablated_output = app.replay_output(disabled_graph, input, config)
+        try:
+            ablated_output = app.replay_output(disabled_graph, input, config)
+        except Exception:
+            # Disabling the node broke the run — it is load-bearing by definition.
+            changed += 1
+            continue
         if content_digest(ablated_output) != content_digest(baseline):
             changed += 1
     log_event(
