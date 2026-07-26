@@ -7,3 +7,8 @@ out/
 *.egg-info/
 .pytest_cache/
 .DS_Store
+out/
+.coverage
+coverage.xml
+__pycache__/
+*.pyc

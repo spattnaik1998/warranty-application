@@ -6,9 +6,21 @@ from typing import TypedDict
 
 import pytest
 
-from warrant.adapters.langgraph import instrument_langgraph, resolve_role
+from warrant.adapters.langgraph import _extract_usage, instrument_langgraph, resolve_role
 from warrant.tools.registry import ToolRole
 from warrant.trace.store import TraceStore
+
+
+class _FakeMessage:
+    """Stands in for a LangChain AIMessage carrying real usage metadata."""
+
+    def __init__(self, content: str, total_tokens: int) -> None:
+        self.content = content
+        self.usage_metadata = {
+            "input_tokens": total_tokens // 2,
+            "output_tokens": total_tokens - total_tokens // 2,
+            "total_tokens": total_tokens,
+        }
 
 lg = pytest.importorskip("langgraph.graph")
 
@@ -67,6 +79,52 @@ def test_adapter_records_nodes_and_tools() -> None:
     assert run.final_output == "x|papers|reviewed"
     assert run.total_tokens > 0
     assert run.labels["tokens"] == "estimated"
+
+
+def test_extract_usage_reads_real_metadata() -> None:
+    # Nested in a messages list, as LangGraph state typically carries them.
+    update = {"messages": [_FakeMessage("hi", 120), _FakeMessage("there", 30)]}
+    total, found = _extract_usage(update)
+    assert (total, found) == (150, True)
+
+    # A summed input/output with no total_tokens still resolves.
+    partial = type("M", (), {"usage_metadata": {"input_tokens": 10, "output_tokens": 7}})()
+    assert _extract_usage({"m": partial}) == (17, True)
+
+    # Nothing measurable -> caller must fall back to estimation.
+    assert _extract_usage({"text": "no usage here"}) == (0, False)
+
+
+def test_extract_usage_counts_echoed_message_once() -> None:
+    # A shared ``seen`` set means a message present in two nodes' states
+    # (message-list state without a reducer) is attributed only to the first.
+    m = _FakeMessage("shared", 500)
+    seen: set[int] = set()
+    assert _extract_usage({"messages": [m]}, seen) == (500, True)
+    assert _extract_usage({"messages": [m, _FakeMessage("new", 40)]}, seen) == (40, True)
+
+
+def test_adapter_uses_measured_tokens_when_available() -> None:
+    from langgraph.graph import END, StateGraph
+
+    class _MS(TypedDict):
+        messages: list
+
+    def worker(s: _MS) -> _MS:
+        return {"messages": s["messages"] + [_FakeMessage("answer", 200)]}
+
+    g = StateGraph(_MS)
+    g.add_node("worker", worker)
+    g.set_entry_point("worker")
+    g.add_edge("worker", END)
+
+    store = TraceStore()
+    app = instrument_langgraph(g.compile(), store, graph_name="measured")
+    app.invoke({"messages": []})
+
+    run = store.all()[0]
+    assert run.node("worker").outcome.tokens == 200   # real usage, not len/4
+    assert run.labels["tokens"] == "measured"
 
 
 def test_invoke_runs_graph_once() -> None:

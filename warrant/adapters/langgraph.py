@@ -14,9 +14,13 @@ Tool attribution: a generic graph node is opaque about which tools it called,
 so the caller declares ``node_tools={node_id: [tool_name, ...]}``. Each tool
 name is resolved to a :class:`ToolRole` via, in order: an explicit
 ``warrant.tool_tag``, the process tool ``REGISTRY``, then a name heuristic.
-Token counts are estimated from output text when the framework exposes no real
-usage metadata; such runs are labelled ``tokens=estimated`` so no analyzer
-mistakes an estimate for a measurement.
+
+Token counts come from LangChain's real ``usage_metadata`` when a node's output
+carries it (the modern ``AIMessage`` field, or a legacy
+``response_metadata['token_usage']``); only when no measurable usage is present
+does the adapter fall back to a length estimate. Each run is labelled
+``tokens=measured`` / ``mixed`` / ``estimated`` accordingly, so no analyzer — and
+no dollar figure — mistakes an estimate for a measurement.
 """
 
 from __future__ import annotations
@@ -46,6 +50,68 @@ _VALIDATOR_HINTS = ("test", "verify", "validate", "check", "lint", "exec", "run_
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate (~4 chars/token) for when no usage metadata exists."""
     return ceil(len(text) / 4) if text else 0
+
+
+def _extract_usage(value: Any, seen: set[int] | None = None) -> tuple[int, bool]:
+    """Sum real LLM token usage in a node update, if the framework exposes it.
+
+    Walks the update for LangChain message-like objects carrying real usage:
+    the modern ``AIMessage.usage_metadata`` (``{"input_tokens", "output_tokens",
+    "total_tokens"}``) or a legacy ``response_metadata["token_usage"]``. Returns
+    ``(total_tokens, found)``; ``found`` is False when nothing measurable is
+    present, so the caller falls back to the length estimate and the run is
+    labelled honestly.
+
+    ``seen`` may be shared across a run's nodes so a message echoed in a later
+    node's state (e.g. message-list state without an ``add_messages`` reducer) is
+    counted once, at the node that produced it — not re-attributed downstream.
+    """
+    total = 0
+    found = False
+    counted: set[int] = seen if seen is not None else set()  # usage objects already tallied
+    local: set[int] = set()  # per-call cycle guard on containers (ids get recycled across calls)
+
+    def _usage_total(meta: Any) -> int | None:
+        if isinstance(meta, Mapping):
+            tokens = meta.get("total_tokens")
+            if tokens is None:
+                given = meta.get("input_tokens"), meta.get("output_tokens")
+                if any(t is not None for t in given):
+                    tokens = sum(int(t) for t in given if t is not None)
+            if tokens is not None:
+                return int(tokens)
+        return None
+
+    def walk(obj: Any) -> None:
+        nonlocal total, found
+        oid = id(obj)
+        if oid in local:
+            return
+        local.add(oid)
+
+        direct = _usage_total(getattr(obj, "usage_metadata", None))
+        if direct is None:
+            rm = getattr(obj, "response_metadata", None)
+            if isinstance(rm, Mapping):
+                direct = _usage_total(rm.get("token_usage") or rm.get("usage"))
+        if direct is not None:
+            # Usage is present, so this update is measured — but only add tokens
+            # the first time we see this specific message (echoes count once).
+            found = True
+            if oid not in counted:
+                counted.add(oid)
+                total += direct
+            return  # counted this message; don't recurse into its fields
+
+        if isinstance(obj, Mapping):
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v)
+
+    walk(value)
+    return total, found
 
 
 def _stringify(value: Any) -> str:
@@ -168,6 +234,9 @@ class InstrumentedApp:
         )
         final_state: Any = None
         prev = time.perf_counter()
+        measured_nodes = 0
+        node_count = 0
+        usage_seen: set[int] = set()  # shared so echoed messages count once
         try:
             for mode, chunk in graph.stream(input, config, stream_mode=["updates", "values"]):
                 if mode == "values":
@@ -179,12 +248,15 @@ class InstrumentedApp:
                 prev = now
                 for node_id, update in chunk.items():
                     text = _stringify(update)
+                    real_tokens, measured = _extract_usage(update, usage_seen)
+                    node_count += 1
+                    measured_nodes += int(measured)
                     run.add_node(
                         NodeRun(
                             node_id=node_id,
                             tool_calls=self._tool_calls_for(node_id),
                             outcome=Outcome(
-                                tokens=_estimate_tokens(text),
+                                tokens=real_tokens if measured else _estimate_tokens(text),
                                 latency_ms=latency_ms,
                                 output_text=text,
                             ),
@@ -197,6 +269,15 @@ class InstrumentedApp:
             if record:
                 self._store.add(run.finalize())
             raise
+
+        # Label token provenance honestly: measured (all nodes had real usage),
+        # mixed (some did), or the default estimated (none did). Downstream $
+        # figures read this so an estimate is never presented as a measurement.
+        if "tokens" not in (labels or {}):
+            if node_count and measured_nodes == node_count:
+                run.labels["tokens"] = "measured"
+            elif measured_nodes:
+                run.labels["tokens"] = "mixed"
 
         run.finalize(self._final_output(final_state))
         log_event(

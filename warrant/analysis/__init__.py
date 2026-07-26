@@ -97,6 +97,15 @@ def run_audit(traces: list[RunTrace], app: Any = None) -> AuditReport:
     ablation = ablation_audit(app, traces, reorganizers) if app is not None else {}
 
     notes: list[str] = []
+    token_modes = {t.labels.get("tokens", "estimated") for t in traces}
+    if token_modes == {"measured"}:
+        notes.append("Cost figures use measured token usage (LangChain usage_metadata).")
+    else:
+        notes.append(
+            "Cost figures use estimated token counts (~4 chars/token) for at least "
+            "some nodes — verdicts are unaffected, but treat $/mo as directional. "
+            "Emit usage_metadata from your nodes for billing-accurate cost."
+        )
     if app is None or getattr(app, "build_graph", None) is None:
         notes.append(
             "Ablation unavailable: pass build_graph(disabled_nodes) to instrument() to "
