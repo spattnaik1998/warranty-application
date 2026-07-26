@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from warrant.analysis.ablation import AblationResult, ablation_audit
-from warrant.analysis.cost import dollars, estimate_cost
+from warrant.analysis.cost import estimate_cost
 from warrant.analysis.distortion import distortion_audit
 from warrant.analysis.novelty import novelty_audit
 from warrant.analysis.report import AuditReport, NodeFinding, Recommendation

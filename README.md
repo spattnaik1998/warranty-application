@@ -1,11 +1,21 @@
-# Warrant — a delegation-economics orchestrator
+# Warrant — a delegation-economics SDK for multi-agent LLM systems
 
-> Every sub-agent must earn a **warrant** to exist: it is admitted into the
-> multi-agent network only if it injects a **new exogenous signal** (a tool
-> output, a retrieval, an environment observation) or performs a
-> **non-redundant external check**. Delegations that merely reorganize evidence
-> already in the shared belief state are rejected or *collapsed* into a single
-> call.
+> **LangSmith shows you your traces. Warrant tells you which of your agents
+> shouldn't exist — and proves the savings.**
+>
+> You wrap your existing agent graph, run it, and Warrant reports which agent
+> nodes are *reorganizers* — they inject no new exogenous signal and only
+> re-process context the system already has — quantifies each one's delegation
+> value by **ablation**, and prints the token/latency/dollar cost of keeping it.
+
+Every sub-agent must earn a **warrant** to exist: it justifies itself only if it
+injects a **new exogenous signal** (a tool output, a retrieval, an environment
+observation) or performs a **non-redundant external check**. Nodes that merely
+reorganize evidence already in the shared state are candidates to *collapse*.
+
+> **Product direction is pinned in [`PRODUCT_DIRECTION.md`](PRODUCT_DIRECTION.md)
+> — read it before extending the codebase.** (A prior effort mistakenly rebuilt
+> Warrant as a generic repo-claims validator; that fork is abandoned.)
 
 Most multi-agent demos add a planner, a critic, and a reviewer and hope the
 system gets better. **On the Reliability Limits of LLM-Based Multi-Agent
@@ -17,14 +27,67 @@ telephone game). Empirically the paper watches accuracy fall from 90.7% to 22.5%
 over five empty relay stages, with the KL divergence between agent posteriors
 predicting the accuracy drop at r≈0.72.
 
-Warrant is the runtime that takes that theorem seriously. It orchestrates a real
-task — reading an AI paper and writing a technical briefing — and refuses to
-spin up an agent that can't pay for itself in information, while instrumenting
-every hop so you can *prove* the multi-agent structure is earning its keep.
+Warrant takes that theorem seriously and turns it into a measurement tool you
+point at *your own* graph.
 
 ---
 
-## What it does
+## Quickstart — audit your LangGraph app
+
+```python
+import warrant
+
+# 1. Wrap your compiled graph. node_tools tells Warrant which tools each node
+#    calls; build_graph unlocks the ablation proof (optional but recommended).
+app = warrant.instrument(
+    compiled_graph,
+    node_tools={"retriever": ["web_search"]},
+    build_graph=build_graph,          # build_graph(disabled_nodes) -> compiled graph
+    output_key="answer",
+)
+
+# 2. Run it as usual.
+with warrant.session():
+    for case in cases:
+        app.invoke(case)
+    report = warrant.audit()
+
+# 3. Read the verdict.
+print(report.to_cli())
+report.to_html("out/audit.html")      # self-contained, shareable
+```
+
+**The capability ladder** — value at zero annotation, sharper as you opt in:
+
+| Level | Signal | You provide |
+|------|--------|-------------|
+| 1 | Structural: flag nodes that call no exogenous tool | nothing |
+| 2 | **Ablation delegation-value + $ savings** (headline) | a `build_graph(disabled)` factory |
+| 3 | Output-novelty economics | an embeddings key (optional) |
+| 4 | Posterior-distortion + matched-condition ledger | `warrant.decision(...)` annotations |
+
+Try it without your own graph:
+
+```bash
+pip install -e ".[dev]"
+warrant audit --example research     # a graph with a deliberately redundant reviewer
+warrant audit --example dogfood      # audits Warrant's own briefing pipeline
+```
+
+The `research` audit names the redundant `reviewer` node COLLAPSE (ablation
+value 0) while keeping the load-bearing `writer` (value 1); the `dogfood` audit
+independently rediscovers that the briefing pipeline's `compose` step is a
+REORGANIZER — the SDK reproducing the hand-built governed design.
+
+---
+
+## The reference implementation (dogfood)
+
+Warrant also ships a fully governed orchestrator for one real task — reading an
+AI paper and writing a technical briefing — which serves as the dogfood target
+above and as a worked example of runtime governance.
+
+### What it does
 
 1. **Two-move governed orchestrator (LangGraph).** An Anthropic orchestrator may
    only `Delegate(Φ)` or `Finish(y)`; it never touches a tool directly
@@ -50,18 +113,28 @@ every hop so you can *prove* the multi-agent structure is earning its keep.
 
 ```
 warrant/
-  config/         settings.py          env-driven, fail-fast config
+  trace/          contract.py store.py    the framework-agnostic Trace Contract (the only seam)
+  adapters/       langgraph.py            translate LangGraph events -> Trace Contract
+  analysis/       structural/ablation/    the audit engine (the four capability signals)
+                  novelty/distortion/cost + run_audit
+  report/         __init__.py             self-contained HTML / CLI / JSON audit report
+  config/         settings.py             env-driven, fail-fast config
   schemas/        belief.py tasks.py ledger.py   Pydantic contracts (Posterior, Delegation Φ, ...)
   providers/      anthropic_ / openai_ / base    adapters + posterior elicitation + deterministic mock
   tools/          registry.py + tools            exogenous/validator/transform tagging
   belief/         state.py distortion.py         belief state + KL/Brier posterior distortion
   gate/           admissibility.py novelty_audit.py   the two-layer gate + delegation economics
-  orchestrator/   graph.py executor.py escalation.py  LangGraph two-move loop
-  pipeline/       steps.py brief_pipeline.py     the AI-paper -> briefing domain
+  orchestrator/   graph.py executor.py escalation.py  LangGraph two-move loop (reference impl)
+  pipeline/       steps.py brief_pipeline.py     the AI-paper -> briefing domain (dogfood target)
   ledger/         probe.py metrics.py report.py  matched conditions + reproduced plots
-  app/            cli.py api.py                   CLI + FastAPI
-  tests/                                          schema, gate, distortion, smoke
+  app/            cli.py api.py                   CLI (audit / brief / probe) + FastAPI
+  tests/                                          contract, adapter, audit, dogfood, gate, ...
+examples/         research_graph + dogfood_brief_graph + runners
 ```
+
+The **Trace Contract** (`warrant/trace/contract.py`) is the single seam:
+adapters write it, analyzers read it, and nothing downstream imports a framework
+SDK. See [`PRODUCT_DIRECTION.md`](PRODUCT_DIRECTION.md) §6.
 
 ## Quickstart
 

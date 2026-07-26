@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "warrant"
 version = "0.1.0"
-description = "A delegation-economics orchestrator: every sub-agent must earn a warrant by injecting new exogenous signal."
+description = "A delegation-economics SDK for multi-agent LLM systems: audit which of your agents are redundant reorganizers and prove the savings."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Sarthak" }]

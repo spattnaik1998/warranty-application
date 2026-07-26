@@ -26,17 +26,17 @@ import warnings
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Mapping
 
-# Silence a noisy pending-deprecation warning emitted by langgraph's serializer
-# on import; it does not affect our usage.
-warnings.filterwarnings(
-    "ignore",
-    message="The default value of `allowed_objects` will change",
-)
-
 from warrant.schemas.belief import Posterior
 from warrant.tools.registry import ToolRole
 from warrant.trace.contract import DecisionPoint, RunTrace
 from warrant.trace.store import TraceStore
+
+# Silence a noisy pending-deprecation warning emitted by langgraph's serializer
+# when the adapter lazily imports it; it does not affect our usage.
+warnings.filterwarnings(
+    "ignore",
+    message="The default value of `allowed_objects` will change",
+)
 
 __version__ = "0.1.0"
 
