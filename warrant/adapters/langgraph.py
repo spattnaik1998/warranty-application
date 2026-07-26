@@ -106,6 +106,9 @@ class InstrumentedApp:
         self.build_graph = build_graph
         self.output_key = output_key
         self.mode = mode
+        # Inputs are retained in-memory (not in the serializable trace) so
+        # ablation can replay them against a rebuilt graph.
+        self.replays: list[tuple[str, Any, dict | None]] = []
 
     # -- attribute passthrough so the wrapper is a drop-in for most callers ---
     def __getattr__(self, item: str) -> Any:  # pragma: no cover - trivial proxy
@@ -207,7 +210,16 @@ class InstrumentedApp:
         )
         if record:
             self._store.add(run)
+            self.replays.append((run.run_id, input, config))
         return run, final_state
+
+    def replay_output(self, graph: Any, input: Any, config: dict | None = None) -> str:
+        """Run ``graph`` on ``input`` without recording; return its final output text.
+
+        Used by ablation to compare a node-disabled graph against the baseline.
+        """
+        _, final_state = self._execute(graph, input, config, record=False)
+        return self._final_output(final_state)
 
     def invoke(self, input: Any, config: dict | None = None, **_: Any) -> Any:
         """Drop-in replacement for ``graph.invoke``; records the run as a side effect.
