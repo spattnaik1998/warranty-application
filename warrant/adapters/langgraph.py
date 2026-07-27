@@ -25,8 +25,10 @@ no dollar figure — mistakes an estimate for a measurement.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from math import ceil
 from typing import Any, Callable, Mapping
 
@@ -144,6 +146,17 @@ def resolve_role(
     return None
 
 
+class _StreamState:
+    """Mutable accumulator threaded through a single (sync or async) stream."""
+
+    def __init__(self) -> None:
+        self.final_state: Any = None
+        self.prev = time.perf_counter()
+        self.measured_nodes = 0
+        self.node_count = 0
+        self.usage_seen: set[int] = set()  # shared so echoed messages count once
+
+
 class InstrumentedApp:
     """A LangGraph app wrapped for observation.
 
@@ -175,6 +188,8 @@ class InstrumentedApp:
         # Inputs are retained in-memory (not in the serializable trace) so
         # ablation can replay them against a rebuilt graph.
         self.replays: list[tuple[str, Any, dict | None]] = []
+        # Flipped once the async path is used, so ablation replays the same way.
+        self._is_async = False
 
     # -- attribute passthrough so the wrapper is a drop-in for most callers ---
     def __getattr__(self, item: str) -> Any:  # pragma: no cover - trivial proxy
@@ -199,6 +214,83 @@ class InstrumentedApp:
             return _stringify(state[self.output_key])
         return _stringify(state)
 
+    # -- shared trace-building helpers (used by both sync and async paths) ----
+    def _new_run(self, labels: dict[str, str] | None) -> RunTrace:
+        return RunTrace(
+            run_id=uuid.uuid4().hex[:12],
+            graph_name=self.graph_name,
+            mode=self.mode,
+            labels={"tokens": "estimated", **(labels or {})},
+        )
+
+    def _consume(self, run: RunTrace, state: _StreamState, mode: str, chunk: Any) -> None:
+        """Fold one streamed ``(mode, chunk)`` pair into the run being built."""
+        if mode == "values":
+            state.final_state = chunk
+            return
+        # mode == "updates": {node_id: partial_state}
+        now = time.perf_counter()
+        latency_ms = int((now - state.prev) * 1000)
+        state.prev = now
+        for node_id, update in chunk.items():
+            text = _stringify(update)
+            real_tokens, measured = _extract_usage(update, state.usage_seen)
+            state.node_count += 1
+            state.measured_nodes += int(measured)
+            run.add_node(
+                NodeRun(
+                    node_id=node_id,
+                    tool_calls=self._tool_calls_for(node_id),
+                    outcome=Outcome(
+                        tokens=real_tokens if measured else _estimate_tokens(text),
+                        latency_ms=latency_ms,
+                        output_text=text,
+                    ),
+                )
+            )
+
+    def _fail_run(self, run: RunTrace, exc: Exception, record: bool) -> None:
+        run.status = RunStatus.ERROR
+        run.labels["error"] = str(exc)
+        log_event(log, "run failed", stage="adapter.run", graph=self.graph_name, status="error", error=str(exc))
+        if record:
+            self._store.add(run.finalize())
+
+    def _finish_run(
+        self,
+        run: RunTrace,
+        state: _StreamState,
+        labels: dict[str, str] | None,
+        record: bool,
+        input: Any,
+        config: dict | None,
+    ) -> RunTrace:
+        # Label token provenance honestly: measured (all nodes had real usage),
+        # mixed (some did), or the default estimated (none did). Downstream $
+        # figures read this so an estimate is never presented as a measurement.
+        if "tokens" not in (labels or {}):
+            if state.node_count and state.measured_nodes == state.node_count:
+                run.labels["tokens"] = "measured"
+            elif state.measured_nodes:
+                run.labels["tokens"] = "mixed"
+
+        run.finalize(self._final_output(state.final_state))
+        log_event(
+            log,
+            "run recorded" if record else "replay complete",
+            stage="adapter.run",
+            graph=self.graph_name,
+            status="ok",
+            nodes=len(run.nodes),
+            tokens=run.total_tokens,
+            recorded=record,
+        )
+        if record:
+            self._store.add(run)
+            self.replays.append((run.run_id, input, config))
+        return run
+
+    # -- synchronous execution path ------------------------------------------
     def run(
         self,
         graph: Any,
@@ -225,75 +317,17 @@ class InstrumentedApp:
         labels: dict[str, str] | None = None,
         record: bool = True,
     ) -> tuple[RunTrace, Any]:
-        """Stream ``graph`` once, building the trace and capturing final state."""
-        run = RunTrace(
-            run_id=uuid.uuid4().hex[:12],
-            graph_name=self.graph_name,
-            mode=self.mode,
-            labels={"tokens": "estimated", **(labels or {})},
-        )
-        final_state: Any = None
-        prev = time.perf_counter()
-        measured_nodes = 0
-        node_count = 0
-        usage_seen: set[int] = set()  # shared so echoed messages count once
+        """Stream ``graph`` once (sync), building the trace and capturing final state."""
+        run = self._new_run(labels)
+        state = _StreamState()
         try:
             for mode, chunk in graph.stream(input, config, stream_mode=["updates", "values"]):
-                if mode == "values":
-                    final_state = chunk
-                    continue
-                # mode == "updates": {node_id: partial_state}
-                now = time.perf_counter()
-                latency_ms = int((now - prev) * 1000)
-                prev = now
-                for node_id, update in chunk.items():
-                    text = _stringify(update)
-                    real_tokens, measured = _extract_usage(update, usage_seen)
-                    node_count += 1
-                    measured_nodes += int(measured)
-                    run.add_node(
-                        NodeRun(
-                            node_id=node_id,
-                            tool_calls=self._tool_calls_for(node_id),
-                            outcome=Outcome(
-                                tokens=real_tokens if measured else _estimate_tokens(text),
-                                latency_ms=latency_ms,
-                                output_text=text,
-                            ),
-                        )
-                    )
+                self._consume(run, state, mode, chunk)
         except Exception as exc:  # surface, never swallow (CLAUDE.md)
-            run.status = RunStatus.ERROR
-            run.labels["error"] = str(exc)
-            log_event(log, "run failed", stage="adapter.run", graph=self.graph_name, status="error", error=str(exc))
-            if record:
-                self._store.add(run.finalize())
+            self._fail_run(run, exc, record)
             raise
-
-        # Label token provenance honestly: measured (all nodes had real usage),
-        # mixed (some did), or the default estimated (none did). Downstream $
-        # figures read this so an estimate is never presented as a measurement.
-        if "tokens" not in (labels or {}):
-            if node_count and measured_nodes == node_count:
-                run.labels["tokens"] = "measured"
-            elif measured_nodes:
-                run.labels["tokens"] = "mixed"
-
-        run.finalize(self._final_output(final_state))
-        log_event(
-            log,
-            "run recorded" if record else "replay complete",
-            stage="adapter.run",
-            graph=self.graph_name,
-            status="ok",
-            nodes=len(run.nodes),
-            tokens=run.total_tokens,
-            recorded=record,
-        )
-        if record:
-            self._store.add(run)
-            self.replays.append((run.run_id, input, config))
-        return run, final_state
+        self._finish_run(run, state, labels, record, input, config)
+        return run, state.final_state
 
     def replay_output(self, graph: Any, input: Any, config: dict | None = None) -> str:
         """Run ``graph`` on ``input`` without recording; return its final output text.
@@ -315,6 +349,79 @@ class InstrumentedApp:
     def stream(self, input: Any, config: dict | None = None, **kw: Any) -> Any:
         """Passthrough stream (not recorded); prefer ``invoke`` for auditing."""
         return self._app.stream(input, config, **kw)
+
+    # -- asynchronous execution path (for async graphs: nodes are ``async def`` /
+    #    driven by ``ainvoke``/``astream``, as in most production LangGraph apps) --
+    async def _aexecute(
+        self,
+        graph: Any,
+        input: Any,
+        config: dict | None = None,
+        *,
+        labels: dict[str, str] | None = None,
+        record: bool = True,
+    ) -> tuple[RunTrace, Any]:
+        """Async twin of :meth:`_execute`, using ``graph.astream``."""
+        self._is_async = True
+        run = self._new_run(labels)
+        state = _StreamState()
+        try:
+            async for mode, chunk in graph.astream(input, config, stream_mode=["updates", "values"]):
+                self._consume(run, state, mode, chunk)
+        except Exception as exc:  # surface, never swallow (CLAUDE.md)
+            self._fail_run(run, exc, record)
+            raise
+        self._finish_run(run, state, labels, record, input, config)
+        return run, state.final_state
+
+    async def arun(
+        self,
+        graph: Any,
+        input: Any,
+        config: dict | None = None,
+        *,
+        labels: dict[str, str] | None = None,
+        record: bool = True,
+    ) -> RunTrace:
+        """Async twin of :meth:`run`."""
+        run, _ = await self._aexecute(graph, input, config, labels=labels, record=record)
+        return run
+
+    async def areplay_output(self, graph: Any, input: Any, config: dict | None = None) -> str:
+        """Async twin of :meth:`replay_output` (used by async ablation)."""
+        _, final_state = await self._aexecute(graph, input, config, record=False)
+        return self._final_output(final_state)
+
+    def replay_output_blocking(self, graph: Any, input: Any, config: dict | None = None) -> str:
+        """Replay (no recording) from a synchronous call site regardless of graph kind.
+
+        Sync ablation drives this. For a sync graph it is just
+        :meth:`replay_output`. For an async graph it awaits :meth:`areplay_output`
+        on an event loop: ``asyncio.run`` when none is running, otherwise a
+        one-shot worker thread with its own loop (so it is safe to call even from
+        inside a running loop, e.g. auditing at the end of an async workflow).
+        """
+        if not self._is_async:
+            return self.replay_output(graph, input, config)
+
+        def _run() -> str:
+            return asyncio.run(self.areplay_output(graph, input, config))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return _run()  # no loop running here — safe to drive one directly
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_run).result()
+
+    async def ainvoke(self, input: Any, config: dict | None = None, **_: Any) -> Any:
+        """Drop-in replacement for ``graph.ainvoke``; records the run as a side effect."""
+        _, final_state = await self._aexecute(self._app, input, config)
+        return final_state
+
+    def astream(self, input: Any, config: dict | None = None, **kw: Any) -> Any:
+        """Passthrough async stream (not recorded); prefer ``ainvoke`` for auditing."""
+        return self._app.astream(input, config, **kw)
 
 
 def instrument_langgraph(app: Any, store: Any, **kwargs: Any) -> InstrumentedApp:
