@@ -79,6 +79,22 @@ value 0) while keeping the load-bearing `writer` (value 1); the `dogfood` audit
 independently rediscovers that the briefing pipeline's `compose` step is a
 REORGANIZER — the SDK reproducing the hand-built governed design.
 
+### Live example — a real async agent (real arXiv + real OpenAI)
+
+```bash
+pip install -e ".[dev,live]"
+WARRANT_MOCK=0 OPENAI_API_KEY=sk-... python -m examples.audit_live_research
+```
+
+`examples/live_research_agent.py` is a genuine **async** LangGraph agent
+(`search → analyze → synthesize → review`) that retrieves real papers from
+arXiv and generates with OpenAI. The audit records **measured** token usage from
+the model responses, ablates each node, and correctly flags `review` COLLAPSE
+(it never changes the final answer) with a real dollar figure — while keeping
+`analyze` and `synthesize` (removing either changes the answer). Output:
+`out/live_research_audit.html`. Retrieval is cached to `out/arxiv_cache/` so
+reruns don't re-hit arXiv, which also keeps ablation deterministic.
+
 ---
 
 ## The reference implementation (dogfood)

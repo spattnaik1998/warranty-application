@@ -27,6 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-mock>=3.12"]
+# Extras only the live example needs; the core SDK reads usage generically and
+# imports no chat-model SDK. langchain-openai must be >=0.2 for pydantic v2 /
+# langchain-core 0.3 compatibility.
+live = ["langchain-openai>=0.2,<0.4"]
 
 [project.scripts]
 warrant = "warrant.app.cli:main"
