@@ -97,15 +97,24 @@ def run_audit(traces: list[RunTrace], app: Any = None) -> AuditReport:
     ablation = ablation_audit(app, traces, reorganizers) if app is not None else {}
 
     notes: list[str] = []
-    token_modes = {t.labels.get("tokens", "estimated") for t in traces}
-    if token_modes == {"measured"}:
-        notes.append("Cost figures use measured token usage (LangChain usage_metadata).")
-    else:
+    # Token-provenance note, driven by per-node source rather than a coarse run
+    # label: only nodes that actually ran a model without reporting usage are
+    # estimated (and named); pure retrieval/tool nodes are costed at $0 and never
+    # trigger a "wire up usage" nag they cannot satisfy.
+    node_sources: dict[str, set[str]] = {}
+    for t in traces:
+        for n in t.nodes:
+            node_sources.setdefault(n.node_id, set()).add(n.outcome.token_source)
+    estimated_nodes = sorted(nid for nid, s in node_sources.items() if "estimated" in s)
+    any_measured = any("measured" in s for s in node_sources.values())
+    if estimated_nodes:
         notes.append(
-            "Cost figures use estimated token counts (~4 chars/token) for at least "
-            "some nodes — verdicts are unaffected, but treat $/mo as directional. "
-            "Emit usage_metadata from your nodes for billing-accurate cost."
+            "Cost is estimated (~4 chars/token) for node(s) that ran a model without "
+            f"reporting token usage: {', '.join(estimated_nodes)}. Verdicts are unaffected; "
+            "emit usage metadata from those nodes for billing-accurate cost (other nodes are exact)."
         )
+    elif any_measured:
+        notes.append("Cost figures use measured token usage from your model responses.")
     if app is None or getattr(app, "build_graph", None) is None:
         notes.append(
             "Ablation unavailable: pass build_graph(disabled_nodes) to instrument() to "

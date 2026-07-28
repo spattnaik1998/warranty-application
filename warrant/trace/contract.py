@@ -94,6 +94,11 @@ class Outcome(BaseModel):
     output_text: str = ""
     output_digest: str = ""
     error: str | None = None
+    # Provenance of ``tokens`` so a dollar figure never overstates its certainty:
+    #   "measured"  — real usage reported by the model (billing-accurate)
+    #   "estimated" — node ran a model but reported no usage; ~4 chars/token proxy
+    #   "none"      — node made no billable model call (e.g. pure retrieval); cost $0
+    token_source: str = "estimated"
 
     def finalize(self) -> "Outcome":
         """Fill the output digest from the text if not already set."""

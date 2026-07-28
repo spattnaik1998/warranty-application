@@ -153,6 +153,7 @@ class _StreamState:
         self.final_state: Any = None
         self.prev = time.perf_counter()
         self.measured_nodes = 0
+        self.billable_nodes = 0  # nodes expected to bill a model (excludes pure tool nodes)
         self.node_count = 0
         self.usage_seen: set[int] = set()  # shared so echoed messages count once
 
@@ -235,16 +236,34 @@ class InstrumentedApp:
         for node_id, update in chunk.items():
             text = _stringify(update)
             real_tokens, measured = _extract_usage(update, state.usage_seen)
+            tool_calls = self._tool_calls_for(node_id)
             state.node_count += 1
-            state.measured_nodes += int(measured)
+
+            # Attribute tokens honestly. A node that reports real usage is
+            # measured. A node that reports none but calls an exogenous tool is a
+            # retrieval/tool node — it bills no model, so its model cost is $0
+            # (never a phantom length estimate). Only a node with no usage *and*
+            # no exogenous tool is presumed an unreported model call and estimated.
+            is_tool_node = any(tc.exogenous for tc in tool_calls)
+            if measured:
+                token_source, tokens = "measured", real_tokens
+                state.measured_nodes += 1
+                state.billable_nodes += 1
+            elif is_tool_node:
+                token_source, tokens = "none", 0
+            else:
+                token_source, tokens = "estimated", _estimate_tokens(text)
+                state.billable_nodes += 1
+
             run.add_node(
                 NodeRun(
                     node_id=node_id,
-                    tool_calls=self._tool_calls_for(node_id),
+                    tool_calls=tool_calls,
                     outcome=Outcome(
-                        tokens=real_tokens if measured else _estimate_tokens(text),
+                        tokens=tokens,
                         latency_ms=latency_ms,
                         output_text=text,
+                        token_source=token_source,
                     ),
                 )
             )
@@ -269,7 +288,8 @@ class InstrumentedApp:
         # mixed (some did), or the default estimated (none did). Downstream $
         # figures read this so an estimate is never presented as a measurement.
         if "tokens" not in (labels or {}):
-            if state.node_count and state.measured_nodes == state.node_count:
+            # Pure tool nodes bill no model, so they don't count against "measured".
+            if state.billable_nodes and state.measured_nodes == state.billable_nodes:
                 run.labels["tokens"] = "measured"
             elif state.measured_nodes:
                 run.labels["tokens"] = "mixed"

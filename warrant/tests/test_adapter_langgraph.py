@@ -125,6 +125,54 @@ def test_adapter_uses_measured_tokens_when_available() -> None:
 
     run = store.all()[0]
     assert run.node("worker").outcome.tokens == 200   # real usage, not len/4
+    assert run.node("worker").outcome.token_source == "measured"
+    assert run.labels["tokens"] == "measured"
+
+
+def test_tool_node_costs_zero_not_a_length_estimate() -> None:
+    """A retrieval node (exogenous tool, no model usage) bills $0, not len/4.
+
+    A pure tool node emits no usage metadata; estimating its token cost from the
+    length of the text it fetched would invent spend nobody is billed for. It must
+    be sourced "none" (tokens 0), and it must not drag an otherwise-measured run
+    to "mixed" or trip the "wire up usage" note.
+    """
+    from langgraph.graph import END, StateGraph
+
+    class _WS(TypedDict):
+        text: str
+        messages: list
+
+    def search(s: _WS) -> _WS:
+        # Real exogenous retrieval: lots of text, but no model call / usage.
+        return {"text": "A" * 4000}
+
+    def writer(s: _WS) -> _WS:
+        return {"messages": [_FakeMessage("final answer", 260)]}
+
+    g = StateGraph(_WS)
+    g.add_node("search", search)
+    g.add_node("writer", writer)
+    g.set_entry_point("search")
+    g.add_edge("search", "writer")
+    g.add_edge("writer", END)
+
+    store = TraceStore()
+    app = instrument_langgraph(
+        g.compile(),
+        store,
+        graph_name="tool-node",
+        node_tools={"search": ["wikipedia"]},
+        tool_tags={"wikipedia": ToolRole.INJECTOR},
+    )
+    app.invoke({"text": "", "messages": []})
+
+    run = store.all()[0]
+    search_node = run.node("search")
+    assert search_node.outcome.token_source == "none"
+    assert search_node.outcome.tokens == 0          # not ~1000 from len/4
+    assert run.node("writer").outcome.token_source == "measured"
+    # The tool node is excluded from the billable tally, so the run is measured.
     assert run.labels["tokens"] == "measured"
 
 
