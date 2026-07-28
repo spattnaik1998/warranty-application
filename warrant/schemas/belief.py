@@ -95,8 +95,8 @@ class Posterior(BaseModel):
 
     def _aligned(self, other: "Posterior") -> tuple[list[float], list[float]]:
         labels = set(self.probs) | set(other.probs)
-        p = [self.probs.get(l, 0.0) for l in labels]
-        q = [other.probs.get(l, 0.0) for l in labels]
+        p = [self.probs.get(label, 0.0) for label in labels]
+        q = [other.probs.get(label, 0.0) for label in labels]
         return p, q
 
     def kl_to(self, other: "Posterior") -> float:

@@ -66,6 +66,30 @@ report.to_html("out/audit.html")      # self-contained, shareable
 | 3 | Output-novelty economics | an embeddings key (optional) |
 | 4 | Posterior-distortion + matched-condition ledger | `warrant.decision(...)` annotations |
 
+### What Warrant needs from your graph
+
+Pointing Warrant at your own LangGraph app is three declarations — everything
+else is inferred:
+
+1. **`node_tools={node_id: [tool_name, ...]}`** — which tools each node calls.
+   A node that calls an *exogenous* tool (retrieval, web, DB, an API) is an
+   injector and is kept; a node that calls none is a reorganizer candidate. Tool
+   names Warrant doesn't recognize can be tagged explicitly with
+   `warrant.tool_tag("my_tool", "INJECTOR")`.
+2. **`build_graph(disabled: set[str]) -> compiled_graph`** — a factory that
+   recompiles your graph with named nodes omitted and edges relinked. This
+   unlocks the headline ablation proof (re-run without a node; did the answer
+   change?). Optional, but it's what turns a guess into a verdict.
+3. **`output_key="answer"`** — the single state field holding the final
+   deliverable. Ablation diffs it to decide whether a node mattered.
+
+**How cost is computed.** Warrant reads real per-response token usage
+(`usage_metadata` on LangChain messages, or any object exposing that field) and
+labels it `measured`. A node that makes no model call (pure retrieval/tool) is
+costed at **$0** — never a phantom length estimate. Only a node that ran a model
+*without* reporting usage is `estimated` (~4 chars/token), and the report names
+it so you know exactly what to instrument. Verdicts never depend on cost.
+
 Try it without your own graph:
 
 ```bash

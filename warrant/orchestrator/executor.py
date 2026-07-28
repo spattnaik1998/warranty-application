@@ -9,9 +9,8 @@ economics ledger.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from warrant.belief.state import BeliefState
 from warrant.gate.novelty_audit import DelegationEconomics
 from warrant.logging_setup import get_logger, log_event
 from warrant.pipeline.steps import DecisionKey, PipelineContext
@@ -23,7 +22,6 @@ from warrant.schemas.belief import (
     SignalClaim,
 )
 from warrant.schemas.ledger import HopRecord
-from warrant.tools import REGISTRY
 
 log = get_logger("orchestrator")
 

@@ -7,7 +7,6 @@ same step primitives but decides delegations through the gate.
 
 from __future__ import annotations
 
-from warrant.belief.state import BeliefState
 from warrant.logging_setup import get_logger, log_event
 from warrant.pipeline.steps import (
     PipelineContext,

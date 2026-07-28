@@ -15,7 +15,6 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from warrant.belief.distortion import communication_loss
 from warrant.gate import DelegationEconomics
 from warrant.gate.admissibility import gate_decision
 from warrant.logging_setup import get_logger, log_event
