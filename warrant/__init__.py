@@ -173,6 +173,34 @@ def audit(store: TraceStore | None = None) -> Any:
     return run_audit((store or _STORE).all(), app=_CURRENT_APP)
 
 
+def scan(target: str, ref: str | None = None) -> list[Any]:
+    """Statically audit a multi-agent codebase — local dir or GitHub repo.
+
+    Reconstructs each LangGraph graph from source (never executing it) and returns
+    one :class:`~warrant.analysis.report.AuditReport` per graph, flagging
+    reorganizer *candidates* (nodes that inject no exogenous signal). This is the
+    zero-execution, level-1 audit: it names what to collapse; proving it and
+    pricing it still needs ``instrument`` + ``audit`` on the running graph.
+
+    Args:
+        target: ``owner/repo``, a ``https://github.com/owner/repo`` URL, or a path
+            to a local directory.
+        ref: optional git branch/tag to clone (GitHub targets only).
+
+    Returns:
+        A list of static ``AuditReport`` objects, one per graph discovered.
+    """
+    from warrant.analysis.static import scan_sources
+    from warrant.ingest.github import cleanup_ref, collect_python_sources, resolve_target
+
+    resolved = resolve_target(target, ref=ref)
+    try:
+        sources = collect_python_sources(resolved.local_path)
+        return scan_sources(sources, source_label=resolved.label)
+    finally:
+        cleanup_ref(resolved)
+
+
 def export() -> list[RunTrace]:
     """Cloud ingestion seam: return the active traces (warrant-cloud uploads these)."""
     return _STORE.all()
@@ -193,6 +221,7 @@ __all__ = [
     "tool_tag",
     "decision",
     "audit",
+    "scan",
     "export",
     "reset",
     "Posterior",

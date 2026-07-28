@@ -90,6 +90,35 @@ costed at **$0** — never a phantom length estimate. Only a node that ran a mod
 *without* reporting usage is `estimated` (~4 chars/token), and the report names
 it so you know exactly what to instrument. Verdicts never depend on cost.
 
+### Scan a GitHub repo without running it (static audit)
+
+You don't always have the app running — sometimes you just have a repo. Point
+Warrant at a codebase and it reconstructs each LangGraph graph from source
+(**never importing or executing it**) and flags the nodes that inject no
+exogenous signal — reorganizer *candidates* to collapse:
+
+```bash
+warrant scan owner/repo                     # a GitHub repo (shallow-cloned)
+warrant scan https://github.com/owner/repo  # or the full URL
+warrant scan ./path/to/local/checkout       # or a local directory
+```
+
+```python
+import warrant
+for report in warrant.scan("owner/repo"):   # one report per graph found
+    print(report.to_cli())
+```
+
+This is the **level-1 (structural) audit, statically**: it names what to look at
+and writes a self-contained HTML report, but it deliberately shows **no ablation
+value and no dollar figure** — neither can be measured without running the graph,
+and Warrant never fabricates a number it hasn't measured. A node flagged as a
+*candidate* is proven (and priced) by wrapping the live graph with
+`warrant.instrument(build_graph=...)` and running `warrant.audit()`. Detection of
+exogenous tools is keyword-based and errs toward under-claiming, and graphs
+assembled dynamically (a `for … add_node(...)` loop) are reported as such rather
+than guessed at.
+
 Try it without your own graph:
 
 ```bash

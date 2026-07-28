@@ -114,6 +114,41 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan(args: argparse.Namespace) -> int:
+    """Statically audit an agent codebase (local dir or GitHub repo)."""
+    import warrant
+
+    try:
+        reports = warrant.scan(args.target, ref=args.ref)
+    except (ValueError, RuntimeError) as exc:
+        print(f"scan failed: {exc}", file=sys.stderr)
+        return 2
+
+    if not reports:
+        print(
+            f"No LangGraph graph found in '{args.target}'. Warrant's static scan looks "
+            "for StateGraph(...) with add_node/add_edge; if the app builds its graph "
+            "another way, run it and use warrant.instrument()/audit() instead."
+        )
+        return 1
+
+    out = get_settings().output_dir
+    out.mkdir(parents=True, exist_ok=True)
+    for i, report in enumerate(reports):
+        print(report.to_cli())
+        print()
+        safe = report.graph_name.replace("/", "_").replace(":", "_") or f"graph{i}"
+        html_path = out / f"scan_{safe}.html"
+        report.to_html(str(html_path))
+        report.to_json_file(str(out / f"scan_{safe}.json"))
+        print(f"HTML report written to {html_path}\n")
+    print(
+        f"Scanned {len(reports)} graph(s). This is a static structural audit — to prove "
+        "a candidate and see its dollar cost, run the graph with warrant.instrument()."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="warrant",
                                      description="Delegation-economics SDK for multi-agent systems.")
@@ -123,6 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--example", choices=["research", "dogfood"], default="research",
                          help="which bundled graph to audit (default: research)")
     p_audit.set_defaults(func=cmd_audit)
+
+    p_scan = sub.add_parser(
+        "scan",
+        help="statically audit an agent codebase (a GitHub repo or local dir) without running it",
+    )
+    p_scan.add_argument("target", help="owner/repo, a github.com URL, or a local directory path")
+    p_scan.add_argument("--ref", default=None, help="git branch/tag to clone (GitHub targets)")
+    p_scan.set_defaults(func=cmd_scan)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--arxiv-id", dest="arxiv_id", default=None)
