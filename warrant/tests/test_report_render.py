@@ -87,8 +87,41 @@ def test_unmeasurable_cost_is_absent_not_zero() -> None:
     cli, html = report.to_cli(), render_html(report)
     assert "$" not in report.savings_sentence()
     assert "$0.00" not in cli and "$0.00" not in html
-    assert "run the graph to price them" in report.savings_sentence()
+    assert "Run the graph to prove and price them" in report.savings_sentence()
     assert "<svg" not in html                 # no empty bar chart implying zero
+    # The cost columns are dropped, not blanked — a column of dashes still reads
+    # as "we tried to price this and got nothing".
+    assert "$/1k runs" not in cli and "$/1k runs" not in html
+    assert "<th>Model</th>" not in html
+
+
+def test_static_headline_counts_candidates_not_collapses() -> None:
+    """A static scan can never emit COLLAPSE, so counting those always said 0."""
+    report = _report(
+        economics_available=False,
+        findings=[
+            _finding("reviewer", recommendation=Recommendation.REVIEW,
+                     ablation_tested=False, ablation_value=None),
+            _finding("analyze", recommendation=Recommendation.REVIEW,
+                     ablation_tested=False, ablation_value=None),
+            _finding("retriever", admissibility=AdmissibilityClass.INJECTOR,
+                     recommendation=Recommendation.KEEP,
+                     ablation_tested=False, ablation_value=None),
+        ],
+    )
+    assert report.collapsible() == []                     # nothing is proven
+    assert len(report.candidates()) == 2                  # but two are worth a look
+    assert report.savings_sentence().startswith("2 reorganizer candidate(s)")
+
+
+def test_static_headline_when_every_node_injects() -> None:
+    report = _report(
+        economics_available=False,
+        findings=[_finding("retriever", admissibility=AdmissibilityClass.INJECTOR,
+                           recommendation=Recommendation.KEEP,
+                           ablation_tested=False, ablation_value=None)],
+    )
+    assert "No reorganizer candidates found" in report.savings_sentence()
 
 
 def test_absent_distortion_is_null_in_json_not_zero() -> None:

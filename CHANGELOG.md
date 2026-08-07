@@ -75,6 +75,32 @@ wearing the clothes of measurements.
 - Tests for the CLI, config validation, report rendering, cost/pricing, the
   confidence curve, and the guards — areas that previously had none. 87 total.
 
+### Fixed — found by pointing `warrant scan` at a real repository
+
+Scanning `langchain-ai/langgraph` (54 graphs, 19 MB) surfaced four defects that a
+single-graph fixture could never show:
+
+- **35 of 54 reports were silently overwritten.** A real codebase has many graphs
+  whose state type is called `State`, and every one of them produced
+  `scan_State.html`. Graph names now include their defining file, and report
+  filenames are deduplicated.
+- **Report filenames then blew Windows' 260-character path limit**, crashing the
+  scan partway through with an unhandled `FileNotFoundError` — after 43 of 54
+  graphs. Stems are capped at 60 characters, buying uniqueness with a short digest
+  of the full name rather than with length. A report that still cannot be written
+  is now reported and skipped instead of discarding the other 53.
+- **The static headline always read "0 candidates"** above a table full of them:
+  it counted COLLAPSE verdicts, which a static scan can never emit (that needs
+  ablation). It now counts reorganizer candidates, and the CLI footer totals them
+  across all graphs.
+- **Every remote scan leaked a full repository clone into the temp directory.**
+  Git marks objects read-only, so `rmtree(ignore_errors=True)` gave up silently —
+  19 MB per scan. The read-only bit is now cleared and retried, and a genuine
+  failure is logged rather than swallowed.
+
+Also: a static report drops its Model and cost columns entirely rather than
+filling them with dashes, which still read as "we tried to price this".
+
 ### Fixed
 
 - **`warrant audit` crashed on a `pip install`.** `cli.py` imported `examples.*`,

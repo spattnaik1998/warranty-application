@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import inspect
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -219,6 +221,30 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+_MAX_STEM = 60
+
+
+def _unique_stem(name: str, used: set[str]) -> str:
+    """A filesystem-safe, collision-free, *short* stem for one report.
+
+    Three constraints at once. A real repo yields dozens of graphs, so names that
+    sanitize alike must not overwrite each other. Graph names carry their source
+    path, so they get long — and a long name plus a deep output directory exceeds
+    Windows' 260-character path limit, which crashed a real scan partway through.
+    So: keep the distinctive tail, and buy uniqueness with a short digest of the
+    full name rather than with length.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "graph"
+    if len(safe) > _MAX_STEM:
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+        safe = safe[-(_MAX_STEM - 9):].lstrip("_") + "_" + digest
+    stem, n = safe, 2
+    while stem in used:
+        stem, n = f"{safe}_{n}", n + 1
+    used.add(stem)
+    return stem
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """Statically audit an agent codebase (local dir or GitHub repo)."""
     import warrant
@@ -239,18 +265,32 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     out = get_settings().output_dir
     out.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
+    unwritten = 0
     for i, report in enumerate(reports):
         print(report.to_cli())
         print()
-        safe = report.graph_name.replace("/", "_").replace(":", "_") or f"graph{i}"
-        html_path = out / f"scan_{safe}.html"
-        report.to_html(str(html_path))
-        report.to_json_file(str(out / f"scan_{safe}.json"))
+        stem = _unique_stem(report.graph_name or f"graph{i}", used)
+        html_path = out / f"scan_{stem}.html"
+        try:
+            report.to_html(str(html_path))
+            report.to_json_file(str(out / f"scan_{stem}.json"))
+        except OSError as exc:
+            # One unwritable report must not discard the other fifty-three. The
+            # analysis already succeeded and was printed above; say what was lost.
+            unwritten += 1
+            print(f"could not write report for {report.graph_name}: {exc}", file=sys.stderr)
+            continue
         print(f"HTML report written to {html_path}\n")
+    candidates = sum(len(r.candidates()) for r in reports)
     print(
-        f"Scanned {len(reports)} graph(s). This is a static structural audit — to prove "
-        "a candidate and see its dollar cost, run the graph with warrant.instrument()."
+        f"Scanned {len(reports)} graph(s), {candidates} reorganizer candidate(s). This is a "
+        "static structural audit — to prove a candidate and see its dollar cost, run the "
+        "graph with warrant.instrument()."
     )
+    if unwritten:
+        print(f"{unwritten} report(s) could not be written to {out}; see the errors above.",
+              file=sys.stderr)
     return 0
 
 

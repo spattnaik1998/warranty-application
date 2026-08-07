@@ -63,7 +63,12 @@ def _finding_row(f: "NodeFinding", report: "AuditReport") -> str:
         abl = f"{f.ablation_value:.2f} <span class='dim'>(n={f.ablation_runs})</span>"
     nov = "—" if f.mean_novelty is None else f"{f.mean_novelty:.2f}"
     model = html.escape(f.model) if f.model else "—"
-    cash = f"${report._money(f):,.2f}" if report.economics_available else "—"
+    # Cost columns are dropped, not blanked, when cost is unmeasurable.
+    money = (
+        f'<td class="mono">{model}</td><td class="num">${report._money(f):,.2f}</td>'
+        if report.economics_available
+        else ""
+    )
     return (
         "<tr>"
         f'<td class="mono">{html.escape(f.node_id)}</td>'
@@ -71,8 +76,7 @@ def _finding_row(f: "NodeFinding", report: "AuditReport") -> str:
         f"<td>{f.admissibility.value}</td>"
         f'<td class="num">{abl}</td>'
         f'<td class="num">{nov}</td>'
-        f'<td class="mono">{model}</td>'
-        f'<td class="num">{cash}</td>'
+        f"{money}"
         f'<td class="num">{f.confidence:.0%}</td>'
         f'<td class="reason">{html.escape(f.reason)}</td>'
         "</tr>"
@@ -92,11 +96,16 @@ def render_html(report: "AuditReport") -> str:
         if report.distortion_available and report.mean_chain_loss_bits is not None
         else ""
     )
+    money_header = (
+        f"<th>Model</th><th>{html.escape(report.money_column)}</th>"
+        if report.economics_available
+        else ""
+    )
     return _PAGE.format(
         graph=html.escape(report.graph_name or "graph"),
         n_runs=report.n_runs,
         savings_line=savings_line,
-        money_header=html.escape(report.money_column),
+        money_header=money_header,
         chart=f'<div class="chart">{chart}</div>' if chart else "",
         rows=rows,
         notes=f"<ul class='notes'>{notes}</ul>" if notes else "",
@@ -160,7 +169,7 @@ _PAGE = """<!doctype html>
   <table>
     <thead><tr>
       <th>Node</th><th>Verdict</th><th>Class</th><th>Ablation</th><th>Novelty</th>
-      <th>Model</th><th>{money_header}</th><th>Conf.</th><th>Reason</th>
+      {money_header}<th>Conf.</th><th>Reason</th>
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>

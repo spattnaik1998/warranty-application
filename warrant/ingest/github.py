@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from warrant.logging_setup import get_logger, log_event
 
@@ -120,12 +124,32 @@ def collect_python_sources(root: Path) -> dict[str, str]:
     return sources
 
 
+def _force_remove(func: Any, path: str, _exc: Any) -> None:
+    """Clear the read-only bit and retry.
+
+    Git marks files under ``.git/objects`` read-only, which makes ``rmtree`` fail
+    on Windows. Previously that failure was swallowed by ``ignore_errors``, so a
+    full repository copy was left in the temp directory after every scan.
+    """
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
 def cleanup_ref(ref: RepoRef) -> None:
     """Remove a temp clone if one was created (no-op for local targets)."""
-    if ref.cleanup is not None:
-        import shutil
-
-        shutil.rmtree(ref.cleanup, ignore_errors=True)
+    if ref.cleanup is None:
+        return
+    # `onexc` replaced `onerror` in 3.12; both take the same three arguments.
+    handler = "onexc" if sys.version_info >= (3, 12) else "onerror"
+    try:
+        shutil.rmtree(ref.cleanup, **{handler: _force_remove})
+    except OSError as exc:
+        # The scan itself already succeeded; say what was left behind rather than
+        # failing the command or silently leaking megabytes per run.
+        log_event(
+            log, "temp clone not removed", stage="ingest",
+            path=str(ref.cleanup), status="warn", error=str(exc),
+        )
 
 
 __all__ = ["RepoRef", "resolve_target", "collect_python_sources", "cleanup_ref"]

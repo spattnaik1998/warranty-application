@@ -353,7 +353,11 @@ def build_static_report(graph: StaticGraph, source_label: str = "") -> AuditRepo
     as a measured zero instead of an unmeasurable one.
     """
     findings = [_static_finding(n) for n in graph.nodes.values()]
-    name = f"{source_label}:{graph.name}" if source_label else graph.name
+    # Include the defining file: a real repo has many graphs whose state type is
+    # called `State`, and a name that collides makes the reports indistinguishable
+    # (and, once written to disk, overwrite each other).
+    parts = [p for p in (source_label, graph.file, graph.name) if p]
+    name = ":".join(parts)
 
     if graph.dynamic and not graph.nodes:
         return AuditReport(

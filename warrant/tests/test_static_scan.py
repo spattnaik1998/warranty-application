@@ -64,6 +64,35 @@ def test_explicit_graph_classifies_injector_and_reorganizers() -> None:
     assert g.nodes["reviewer"].calls_llm is False
 
 
+def test_cleanup_removes_a_clone_with_read_only_files(tmp_path) -> None:
+    """Git leaves object files read-only; rmtree used to give up and leak them."""
+    import os
+    import stat
+
+    from warrant.ingest.github import RepoRef, cleanup_ref
+
+    clone = tmp_path / "warrant_scan_fake"
+    (clone / ".git" / "objects").mkdir(parents=True)
+    blob = clone / ".git" / "objects" / "abc123"
+    blob.write_text("packed object", encoding="utf-8")
+    os.chmod(blob, stat.S_IREAD)                       # what git actually does
+
+    cleanup_ref(RepoRef(local_path=clone, label="fake", is_remote=True, cleanup=clone))
+    assert not clone.exists()
+
+
+def test_cleanup_is_a_noop_for_local_targets(tmp_path) -> None:
+    """Scanning a directory the user already had must never delete it."""
+    from warrant.ingest.github import RepoRef, cleanup_ref
+
+    theirs = tmp_path / "their_checkout"
+    theirs.mkdir()
+    (theirs / "app.py").write_text("x = 1", encoding="utf-8")
+
+    cleanup_ref(RepoRef(local_path=theirs, label="their_checkout", is_remote=False))
+    assert (theirs / "app.py").exists()
+
+
 def test_explicit_graph_report_keeps_injector_flags_candidates() -> None:
     report = scan_sources({"app.py": _EXPLICIT}, source_label="demo/repo")[0]
     verdicts = {f.node_id: f.recommendation for f in report.findings}

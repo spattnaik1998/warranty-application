@@ -96,12 +96,26 @@ class AuditReport(BaseModel):
     def collapsible(self) -> list[NodeFinding]:
         return [f for f in self.findings if f.collapsible]
 
+    def candidates(self) -> list[NodeFinding]:
+        """Nodes that inject no exogenous signal — reorganizers, proven or not.
+
+        A static scan can never emit COLLAPSE (that needs ablation), so this is
+        what its headline counts; a live audit reports the proven subset instead.
+        """
+        return [f for f in self.findings if f.admissibility is AdmissibilityClass.REORGANIZER]
+
     # -- economics phrasing (shared by CLI and HTML) ------------------------- #
     def savings_sentence(self) -> str:
         """One sentence of savings, in whichever unit the evidence supports."""
         n = len(self.collapsible())
         if not self.economics_available:
-            return f"{n} reorganizer candidate(s) to investigate — run the graph to price them."
+            found = len(self.candidates())
+            if not found:
+                return "No reorganizer candidates found — every node injects an exogenous signal."
+            return (
+                f"{found} reorganizer candidate(s) to investigate — nodes that inject no "
+                "exogenous signal. Run the graph to prove and price them."
+            )
         if self.runs_per_month is not None:
             return (
                 f"Collapsing {n} redundant agent(s) saves "
@@ -131,15 +145,16 @@ class AuditReport(BaseModel):
 
     # -- human-readable CLI table ------------------------------------------- #
     def to_cli(self) -> str:
-        width = 74
+        # A money column of dashes still reads as "we tried to price this"; when
+        # cost is unmeasurable the column is dropped rather than emptied.
+        show_money = self.economics_available
+        width = 74 if show_money else 59
         lines: list[str] = []
         lines.append(f"Warrant delegation audit — {self.graph_name}  ({self.n_runs} run(s))")
         lines.append("=" * width)
-        money = self.money_column
-        header = (
-            f"{'node':<16}{'verdict':<10}{'class':<13}"
-            f"{'ablation':>14}{'nov':>6}{money:>15}"
-        )
+        header = f"{'node':<16}{'verdict':<10}{'class':<13}{'ablation':>14}{'nov':>6}"
+        if show_money:
+            header += f"{self.money_column:>15}"
         lines.append(header)
         lines.append("-" * width)
         for f in self.findings:
@@ -148,11 +163,13 @@ class AuditReport(BaseModel):
             else:
                 abl = f"{f.ablation_value:.2f} (n={f.ablation_runs})"
             nov = "-" if f.mean_novelty is None else f"{f.mean_novelty:.2f}"
-            cash = "-" if not self.economics_available else f"{self._money(f):,.2f}"
-            lines.append(
+            row = (
                 f"{f.node_id:<16}{f.recommendation.value:<10}{f.admissibility.value:<13}"
-                f"{abl:>14}{nov:>6}{cash:>15}"
+                f"{abl:>14}{nov:>6}"
             )
+            if show_money:
+                row += f"{self._money(f):>15,.2f}"
+            lines.append(row)
         lines.append("-" * width)
         lines.append(self.savings_sentence())
         if self.distortion_available and self.mean_chain_loss_bits is not None:
