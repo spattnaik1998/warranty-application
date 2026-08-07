@@ -107,6 +107,10 @@ def session(store: TraceStore | None = None) -> Iterator[TraceStore]:
     prev, _STORE = _STORE, active
     if _CURRENT_APP is not None:
         _CURRENT_APP._store = active
+        # Replay inputs are session-scoped too: leaving last session's inputs on
+        # the app would grow without bound and let a stale run's payload feed
+        # this session's ablation.
+        _CURRENT_APP.replays.clear()
     try:
         yield active
     finally:
@@ -165,12 +169,23 @@ def _drain_pending_decisions() -> None:
     _PENDING_DECISIONS[:] = remaining
 
 
-def audit(store: TraceStore | None = None) -> Any:
-    """Analyze the recorded runs and return an :class:`AuditReport`."""
+def audit(store: TraceStore | None = None, runs_per_month: int | None = None) -> Any:
+    """Analyze the recorded runs and return an :class:`AuditReport`.
+
+    Args:
+        store: trace store to analyze; defaults to the active session's.
+        runs_per_month: your production traffic. Supply it and the report projects
+            a monthly dollar figure, labelled as declared. Omit it and the report
+            stays in dollars per 1,000 runs — the unit Warrant can actually
+            measure. Warrant never invents a volume on your behalf. Falls back to
+            ``WARRANT_RUNS_PER_MONTH`` if set.
+    """
     from warrant.analysis import run_audit
 
     _drain_pending_decisions()
-    return run_audit((store or _STORE).all(), app=_CURRENT_APP)
+    return run_audit(
+        (store or _STORE).all(), app=_CURRENT_APP, runs_per_month=runs_per_month
+    )
 
 
 def scan(target: str, ref: str | None = None) -> list[Any]:
@@ -212,6 +227,8 @@ def reset() -> None:
     _STORE.clear()
     _TOOL_TAGS.clear()
     _PENDING_DECISIONS.clear()
+    if _CURRENT_APP is not None:
+        _CURRENT_APP.replays.clear()
     _CURRENT_APP = None
 
 

@@ -41,6 +41,17 @@ def _get_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an int, got {raw!r}") from exc
 
 
+def _get_optional_int(name: str) -> int | None:
+    """Like ``_get_int`` but with no default: unset means genuinely unknown."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an int, got {raw!r}") from exc
+
+
 def _get_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -68,8 +79,17 @@ class Settings:
     posterior_samples: int
     posterior_temperature: float
 
-    # Delegation economics.
+    # Delegation economics. Two distinct thresholds, deliberately separate:
+    #   novelty_kl_epsilon — KL divergence below which a delegation's observations
+    #     never move the posterior (the runtime gate, in bits).
+    #   novelty_epsilon    — fraction of a node's output tokens that are new
+    #     relative to its context, below which the audit calls it a restatement.
     novelty_kl_epsilon: float
+    novelty_epsilon: float
+
+    # Production traffic, if the operator declares it. ``None`` means unknown, and
+    # the audit reports per-1,000-runs figures rather than inventing a volume.
+    runs_per_month: int | None
 
     # Risk-triggered escalation (Theorem 10).
     wrong_cost: float
@@ -92,6 +112,8 @@ class Settings:
             posterior_samples=_get_int("WARRANT_POSTERIOR_SAMPLES", 5),
             posterior_temperature=_get_float("WARRANT_POSTERIOR_TEMPERATURE", 0.7),
             novelty_kl_epsilon=_get_float("WARRANT_NOVELTY_KL_EPSILON", 0.05),
+            novelty_epsilon=_get_float("WARRANT_NOVELTY_EPSILON", 0.15),
+            runs_per_month=_get_optional_int("WARRANT_RUNS_PER_MONTH"),
             wrong_cost=_get_float("WARRANT_WRONG_COST", 1.0),
             review_cost=_get_float("WARRANT_REVIEW_COST", 0.15),
             output_dir=Path(os.getenv("WARRANT_OUTPUT_DIR", "./out")).resolve(),
@@ -122,6 +144,10 @@ class Settings:
             raise ConfigError("WARRANT_POSTERIOR_TEMPERATURE must be in [0, 2]")
         if self.novelty_kl_epsilon < 0:
             raise ConfigError("WARRANT_NOVELTY_KL_EPSILON must be >= 0")
+        if not (0.0 <= self.novelty_epsilon <= 1.0):
+            raise ConfigError("WARRANT_NOVELTY_EPSILON must be in [0, 1]")
+        if self.runs_per_month is not None and self.runs_per_month < 1:
+            raise ConfigError("WARRANT_RUNS_PER_MONTH must be >= 1")
         if self.review_cost < 0 or self.wrong_cost < 0:
             raise ConfigError("cost parameters must be >= 0")
         return self

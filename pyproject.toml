@@ -36,6 +36,9 @@ live = ["langchain-openai>=0.2,<0.4"]
 warrant = "warrant.app.cli:main"
 
 [tool.setuptools.packages.find]
+# The demo graphs live in warrant/examples/ so `warrant audit --example ...` works
+# from a plain pip install; the repo's top-level examples/ holds runnable scripts
+# and is deliberately not packaged (too generic a name to claim on PyPI).
 include = ["warrant*"]
 
 [tool.pytest.ini_options]

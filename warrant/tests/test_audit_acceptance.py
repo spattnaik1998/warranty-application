@@ -73,15 +73,81 @@ def test_audit_names_reviewer_collapsible_and_keeps_writer() -> None:
     assert reviewer.recommendation is Recommendation.COLLAPSE
     assert reviewer.ablation_tested is True
     assert reviewer.ablation_value == 0.0
-    assert reviewer.projected_savings_per_month > 0
+    assert reviewer.ablation_runs == 3
+    assert reviewer.projected_savings_per_1k_runs > 0
 
     # writer: reorganizer structurally, but load-bearing -> keep (not collapsed).
     writer = by_id["writer"]
     assert writer.recommendation is Recommendation.KEEP
     assert writer.ablation_value == 1.0
 
-    assert report.projected_savings_per_month > 0
+    assert report.projected_savings_per_1k_runs > 0
     assert len(report.collapsible()) == 1
+
+    # No volume was declared, so no monthly figure is invented anywhere.
+    assert report.runs_per_month is None
+    assert report.projected_savings_per_month is None
+    assert reviewer.dollars_per_month is None
+    assert "per 1,000 runs" in report.savings_sentence()
+
+
+def test_declared_volume_projects_a_monthly_figure() -> None:
+    """A monthly number appears only when the caller supplies their traffic."""
+    warrant.reset()
+    app = warrant.instrument(
+        build_graph(),
+        node_tools={"retriever": ["arxiv"]},
+        tools={"arxiv": "INJECTOR"},
+        build_graph=build_graph,
+        graph_name="research-brief",
+        output_key="text",
+    )
+    with warrant.session():
+        for _ in range(3):
+            app.invoke({"text": ""})
+        report = warrant.audit(runs_per_month=30_000)
+
+    reviewer = {f.node_id: f for f in report.findings}["reviewer"]
+    assert report.runs_per_month == 30_000
+    assert reviewer.dollars_per_month is not None
+    # 30,000 runs is 30 × 1,000; both figures are rounded for display, so compare
+    # loosely — the exact arithmetic is pinned in test_analysis_units.
+    assert reviewer.dollars_per_month == pytest.approx(
+        reviewer.dollars_per_1k_runs * 30, abs=0.01
+    )
+    assert report.projected_savings_per_month > 0
+    # The word "declared" is load-bearing: the reader must know it's their number.
+    assert "declared" in report.savings_sentence()
+    warrant.reset()
+
+
+def test_collapse_confidence_scales_with_evidence() -> None:
+    """One clean replay is weak evidence and must not render as near-certainty."""
+    warrant.reset()
+    app = warrant.instrument(
+        build_graph(),
+        node_tools={"retriever": ["arxiv"]},
+        tools={"arxiv": "INJECTOR"},
+        build_graph=build_graph,
+        graph_name="research-brief",
+        output_key="text",
+    )
+    with warrant.session():
+        app.invoke({"text": ""})
+        thin = warrant.audit()
+    with warrant.session():
+        for _ in range(40):
+            app.invoke({"text": ""})
+        thick = warrant.audit()
+    warrant.reset()
+
+    one = {f.node_id: f for f in thin.findings}["reviewer"]
+    many = {f.node_id: f for f in thick.findings}["reviewer"]
+    assert one.recommendation is Recommendation.COLLAPSE
+    assert many.recommendation is Recommendation.COLLAPSE
+    assert one.ablation_runs == 1 and many.ablation_runs == 40
+    assert one.confidence < 0.3            # rule of three: 1 run proves little
+    assert many.confidence > 0.8           # 40 clean replays is real evidence
 
 
 def test_audit_degrades_without_build_graph() -> None:

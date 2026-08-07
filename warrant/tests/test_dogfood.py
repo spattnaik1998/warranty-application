@@ -17,7 +17,7 @@ pytest.importorskip("langgraph.graph")
 
 
 def test_audit_rediscovers_compose_reorganizer() -> None:
-    from examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
+    from warrant.examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
 
     warrant.reset()
     app = warrant.instrument(

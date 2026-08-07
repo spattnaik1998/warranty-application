@@ -99,6 +99,13 @@ class Outcome(BaseModel):
     #   "estimated" — node ran a model but reported no usage; ~4 chars/token proxy
     #   "none"      — node made no billable model call (e.g. pure retrieval); cost $0
     token_source: str = "estimated"
+    # Which model actually billed these tokens, when the framework reports it.
+    # ``None`` means the adapter could not tell, and the audit must fall back to a
+    # configured default — a fact the report discloses rather than hides.
+    model: str | None = None
+    # True when one node's messages came from more than one model; ``model`` then
+    # names the one that accounted for the most tokens.
+    mixed_models: bool = False
 
     def finalize(self) -> "Outcome":
         """Fill the output digest from the text if not already set."""

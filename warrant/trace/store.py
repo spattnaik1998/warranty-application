@@ -89,6 +89,18 @@ class SQLiteTraceStore(TraceStore):
             self._db.commit()
         return trace
 
+    def clear(self) -> None:
+        """Drop every trace, on disk as well as in memory.
+
+        Overriding matters: without it ``session()`` and ``reset()`` would empty
+        the cache while the rows survived, and the next ``load()`` would
+        resurrect traces the caller believed they had discarded.
+        """
+        with self._lock:
+            self._db.execute("DELETE FROM traces")
+            self._db.commit()
+        super().clear()
+
     def load(self) -> list[RunTrace]:
         """Rehydrate the in-memory cache from disk. Returns all loaded traces."""
         with self._lock:

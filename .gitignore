@@ -12,3 +12,6 @@ out/
 coverage.xml
 __pycache__/
 *.pyc
+build/
+dist/
+.ruff_cache/

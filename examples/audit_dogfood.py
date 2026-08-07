@@ -9,7 +9,7 @@ Prints the audit and writes out/dogfood_audit.html. The audit should classify
 from __future__ import annotations
 
 import warrant
-from examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
+from warrant.examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
 from warrant.schemas.tasks import BriefRequest
 
 REQUESTS = [

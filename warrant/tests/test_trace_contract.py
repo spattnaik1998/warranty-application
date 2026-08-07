@@ -92,3 +92,17 @@ def test_sqlite_store_persists_and_reloads(tmp_path) -> None:
     assert reloaded.status is RunStatus.OK
     assert reloaded.node("compose").decision.posterior.top_label() == "a"
     reopened.close()
+
+
+def test_sqlite_clear_deletes_from_disk_too(tmp_path) -> None:
+    """A cleared store must stay cleared: `session()` scopes runs, and a trace
+    that reappeared on the next open would silently widen the next audit."""
+    db = tmp_path / "traces.db"
+    store = SQLiteTraceStore(db)
+    store.add(_sample_run())
+    store.clear()
+    assert len(store) == 0
+    assert store.load() == []            # nothing left behind in the table
+    store.close()
+
+    assert len(SQLiteTraceStore(db)) == 0  # and nothing resurrects on reopen

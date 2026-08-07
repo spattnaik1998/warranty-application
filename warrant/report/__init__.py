@@ -17,38 +17,53 @@ if TYPE_CHECKING:
 _VERDICT_COLOR = {"KEEP": "#2f9e44", "COLLAPSE": "#e8590c", "REVIEW": "#f08c00"}
 
 
-def _bar_svg(findings: "list[NodeFinding]", max_dollars: float) -> str:
-    """Inline horizontal bar chart of $/mo per node, coloured by verdict."""
-    if not findings:
+def _bar_svg(report: "AuditReport") -> str:
+    """Inline horizontal bar chart of cost per node, coloured by verdict.
+
+    Omitted entirely when cost could not be measured — an empty chart implies a
+    measured zero, which is exactly the claim a static scan must not make.
+    """
+    findings = report.findings
+    if not findings or not report.economics_available:
         return ""
+    unit = "/mo" if report.runs_per_month is not None else " per 1k runs"
+    amounts = [report._money(f) for f in findings]
+    max_dollars = max(amounts, default=0.0)
     row_h, gap, label_w, chart_w = 26, 10, 130, 320
     height = len(findings) * (row_h + gap) + gap
     rows: list[str] = []
-    for i, f in enumerate(findings):
+    for i, (f, amount) in enumerate(zip(findings, amounts)):
         y = gap + i * (row_h + gap)
-        width = 0 if max_dollars <= 0 else max(2, f.dollars_per_month / max_dollars * chart_w)
+        width = 0 if max_dollars <= 0 else max(2, amount / max_dollars * chart_w)
         color = _VERDICT_COLOR.get(f.recommendation.value, "#868e96")
         name = html.escape(f.node_id)
         rows.append(
             f'<text x="{label_w - 8}" y="{y + row_h * 0.68}" text-anchor="end" '
             f'class="lbl">{name}</text>'
             f'<rect x="{label_w}" y="{y}" width="{width:.1f}" height="{row_h}" '
-            f'rx="3" fill="{color}"><title>{name}: ${f.dollars_per_month:,.2f}/mo</title></rect>'
+            f'rx="3" fill="{color}"><title>{name}: ${amount:,.2f}{unit}</title></rect>'
             f'<text x="{label_w + width + 6:.1f}" y="{y + row_h * 0.68}" '
-            f'class="val">${f.dollars_per_month:,.0f}/mo</text>'
+            f'class="val">${amount:,.2f}</text>'
         )
     return (
-        f'<svg viewBox="0 0 {label_w + chart_w + 90} {height}" '
-        f'width="100%" role="img" aria-label="Monthly cost per node">'
+        f'<svg viewBox="0 0 {label_w + chart_w + 110} {height}" '
+        f'width="100%" role="img" aria-label="Cost per node{html.escape(unit)}">'
         + "".join(rows)
         + "</svg>"
     )
 
 
-def _finding_row(f: "NodeFinding") -> str:
+def _finding_row(f: "NodeFinding", report: "AuditReport") -> str:
     color = _VERDICT_COLOR.get(f.recommendation.value, "#868e96")
-    abl = "—" if f.ablation_value is None else f"{f.ablation_value:.2f}"
+    if f.ablation_value is None:
+        abl = "—"
+    else:
+        # n is part of the finding, not a footnote: 0.00 over 1 run and over 50
+        # runs are different claims and must not render identically.
+        abl = f"{f.ablation_value:.2f} <span class='dim'>(n={f.ablation_runs})</span>"
     nov = "—" if f.mean_novelty is None else f"{f.mean_novelty:.2f}"
+    model = html.escape(f.model) if f.model else "—"
+    cash = f"${report._money(f):,.2f}" if report.economics_available else "—"
     return (
         "<tr>"
         f'<td class="mono">{html.escape(f.node_id)}</td>'
@@ -56,7 +71,8 @@ def _finding_row(f: "NodeFinding") -> str:
         f"<td>{f.admissibility.value}</td>"
         f'<td class="num">{abl}</td>'
         f'<td class="num">{nov}</td>'
-        f'<td class="num">${f.dollars_per_month:,.2f}</td>'
+        f'<td class="mono">{model}</td>'
+        f'<td class="num">{cash}</td>'
         f'<td class="num">{f.confidence:.0%}</td>'
         f'<td class="reason">{html.escape(f.reason)}</td>'
         "</tr>"
@@ -64,27 +80,24 @@ def _finding_row(f: "NodeFinding") -> str:
 
 
 def render_html(report: "AuditReport") -> str:
-    max_dollars = max((f.dollars_per_month for f in report.findings), default=0.0)
-    rows = "".join(_finding_row(f) for f in report.findings)
-    chart = _bar_svg(report.findings, max_dollars)
+    rows = "".join(_finding_row(f, report) for f in report.findings)
+    chart = _bar_svg(report)
     notes = "".join(f"<li>{html.escape(n)}</li>" for n in report.notes)
-    collapsible = report.collapsible()
-    savings_line = (
-        f"Collapsing {len(collapsible)} redundant agent(s) saves "
-        f"<strong>${report.projected_savings_per_month:,.2f}/mo</strong> "
-        f"of ${report.total_dollars_per_month:,.2f}/mo total."
-    )
+    # The savings sentence is built once, on the report, so CLI/HTML/JSON can
+    # never disagree about what unit the headline is in.
+    savings_line = html.escape(report.savings_sentence())
     distortion = (
         f'<p class="sub">Mean posterior chain-loss: '
         f"{report.mean_chain_loss_bits:.3f} bits across annotated decision chains.</p>"
-        if report.distortion_available
+        if report.distortion_available and report.mean_chain_loss_bits is not None
         else ""
     )
     return _PAGE.format(
         graph=html.escape(report.graph_name or "graph"),
         n_runs=report.n_runs,
         savings_line=savings_line,
-        chart=chart,
+        money_header=html.escape(report.money_column),
+        chart=f'<div class="chart">{chart}</div>' if chart else "",
         rows=rows,
         notes=f"<ul class='notes'>{notes}</ul>" if notes else "",
         distortion=distortion,
@@ -128,6 +141,7 @@ _PAGE = """<!doctype html>
   td.num {{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }}
   td.mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
   td.reason {{ color:var(--muted); font-size:12.5px; min-width:220px; }}
+  .dim {{ color:var(--muted); font-size:11.5px; }}
   .badge {{ display:inline-block; color:#fff; padding:.1rem .5rem; border-radius:999px;
     font-size:11px; font-weight:700; letter-spacing:.02em; }}
   .notes {{ color:var(--muted); font-size:13px; padding-left:1.1rem; }}
@@ -141,12 +155,12 @@ _PAGE = """<!doctype html>
   <p class="sub">Graph <strong>{graph}</strong> · {n_runs} run(s) observed</p>
   <div class="headline">{savings_line}</div>
   {distortion}
-  <div class="chart">{chart}</div>
+  {chart}
   <div class="tablewrap">
   <table>
     <thead><tr>
       <th>Node</th><th>Verdict</th><th>Class</th><th>Ablation</th><th>Novelty</th>
-      <th>$/mo</th><th>Conf.</th><th>Reason</th>
+      <th>Model</th><th>{money_header}</th><th>Conf.</th><th>Reason</th>
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
@@ -154,8 +168,10 @@ _PAGE = """<!doctype html>
   {notes}
   <footer>
     Ablation = fraction of runs whose final answer changed when the node was disabled
-    (0 ⇒ collapsible, 1 ⇒ load-bearing). Novelty = fraction of a node's output tokens
-    absent from prior context. Grounded in Ao, Gao &amp; Simchi-Levi, arXiv:2603.26993.
+    (0 ⇒ collapsible, 1 ⇒ load-bearing), over n replays. Novelty = fraction of a node's
+    output tokens absent from prior context. Confidence scales with that evidence: a
+    COLLAPSE seen over few runs is scored by the rule of three, not asserted.
+    Grounded in Ao, Gao &amp; Simchi-Levi, arXiv:2603.26993.
   </footer>
 </div>
 </body>

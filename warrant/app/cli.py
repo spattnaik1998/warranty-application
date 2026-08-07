@@ -1,15 +1,22 @@
 """Command-line interface.
 
+    warrant audit --app myapp.graph:build --cases cases.jsonl  # audit your graph
+    warrant audit --example research                            # or a bundled demo
+    warrant scan owner/repo                                     # static, no execution
     warrant brief --youtube "Last Week in AI"
-    warrant brief --arxiv-id 2603.26993
-    warrant brief --arxiv-id 2603.26993 --ungoverned   # naive baseline
-    warrant probe                                       # run the Delegation Ledger
+    warrant brief --arxiv-id 2603.26993 --ungoverned            # naive baseline
+    warrant probe                                               # the Delegation Ledger
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
+import json
 import sys
+from pathlib import Path
+from typing import Any
 
 from warrant.config import get_settings
 from warrant.logging_setup import configure_logging
@@ -74,12 +81,110 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def cmd_audit(args: argparse.Namespace) -> int:
-    """Run a bundled example graph and emit a delegation audit."""
+def _load_attr(spec: str) -> Any:
+    """Import ``module:attr`` and return the attribute.
+
+    The one place the CLI touches user code. Failures are the user's most likely
+    mistake, so they carry the spec and the underlying error rather than a
+    bare traceback.
+    """
+    if ":" not in spec:
+        raise ValueError(f"'{spec}' must be in module:attribute form, e.g. myapp.graph:build")
+    module_name, _, attr = spec.partition(":")
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ValueError(
+            f"could not import '{module_name}' ({exc}). Is it on your PYTHONPATH? "
+            "Running from your project root usually fixes this."
+        ) from exc
+    try:
+        return getattr(module, attr)
+    except AttributeError as exc:
+        raise ValueError(f"'{module_name}' has no attribute '{attr}'.") from exc
+
+
+def _load_cases(path: str) -> list[Any]:
+    """Read one JSON input per line (JSONL) — the graph inputs to replay."""
+    cases: list[Any] = []
+    for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            cases.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path}:{lineno} is not valid JSON — {exc}") from exc
+    if not cases:
+        raise ValueError(f"{path} contained no cases. Put one JSON graph input per line.")
+    return cases
+
+
+def _materialize(obj: Any) -> Any:
+    """Accept a compiled graph, a zero-arg factory, or a ``build_graph(disabled)``.
+
+    Users reach for whichever they already have; requiring one shape would just
+    make them write a wrapper.
+    """
+    if hasattr(obj, "invoke") or not callable(obj):
+        return obj
+    takes_arg = bool(inspect.signature(obj).parameters)
+    return obj(frozenset()) if takes_arg else obj()
+
+
+def _audit_user_graph(args: argparse.Namespace) -> int:
+    """Audit the caller's own graph: `--app module:attr --cases cases.jsonl`."""
     import warrant
 
+    if not args.cases:
+        print("audit failed: --app requires --cases PATH (one JSON graph input per line).",
+              file=sys.stderr)
+        return 2
+    try:
+        app_obj = _materialize(_load_attr(args.app))
+        build_graph = _load_attr(args.build_graph) if args.build_graph else None
+        cases = _load_cases(args.cases)
+        node_tools = (
+            json.loads(Path(args.node_tools).read_text(encoding="utf-8"))
+            if args.node_tools
+            else None
+        )
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        print(f"audit failed: {exc}", file=sys.stderr)
+        return 2
+
+    warrant.reset()
+    instrumented = warrant.instrument(
+        app_obj,
+        node_tools=node_tools,
+        build_graph=build_graph,
+        graph_name=args.name or args.app,
+        output_key=args.output_key,
+    )
+    with warrant.session():
+        for case in cases:
+            instrumented.invoke(case)
+        report = warrant.audit(runs_per_month=args.runs_per_month)
+
+    print(report.to_cli())
+    out = get_settings().output_dir
+    stem = (args.name or "audit").replace("/", "_").replace(":", "_")
+    html_path = out / f"{stem}.html"
+    report.to_html(str(html_path))
+    report.to_json_file(str(out / f"{stem}.json"))
+    print(f"\nHTML report written to {html_path}")
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Audit a graph — the caller's own with ``--app``, else a bundled example."""
+    import warrant
+
+    if args.app:
+        return _audit_user_graph(args)
+
     if args.example == "dogfood":
-        from examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
+        from warrant.examples.dogfood_brief_graph import NODE_TOOLS, build_brief_graph
         from warrant.schemas.tasks import BriefRequest
 
         warrant.reset()
@@ -90,7 +195,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         inputs = [{"request": BriefRequest(arxiv_id="2603.26993")},
                   {"request": BriefRequest(youtube_channel="Last Week in AI")}]
     else:
-        from examples.research_graph import NODE_TOOLS, build_research_graph
+        from warrant.examples.research_graph import NODE_TOOLS, build_research_graph
 
         warrant.reset()
         app = warrant.instrument(
@@ -103,7 +208,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
     with warrant.session():
         for inp in inputs:
             app.invoke(inp)
-        report = warrant.audit()
+        report = warrant.audit(runs_per_month=args.runs_per_month)
 
     print(report.to_cli())
     out = get_settings().output_dir
@@ -154,9 +259,39 @@ def build_parser() -> argparse.ArgumentParser:
                                      description="Delegation-economics SDK for multi-agent systems.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_audit = sub.add_parser("audit", help="audit a bundled example graph and write a report")
+    p_audit = sub.add_parser(
+        "audit",
+        help="audit a running graph — yours via --app, or a bundled example",
+        description=(
+            "Audit your own LangGraph app:\n"
+            "  warrant audit --app myapp.graph:build_graph --build-graph myapp.graph:build_graph \\\n"
+            "                --cases cases.jsonl --output-key answer [--runs-per-month 30000]\n"
+            "Or try it on a bundled demo:  warrant audit --example research"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p_audit.add_argument("--example", choices=["research", "dogfood"], default="research",
                          help="which bundled graph to audit (default: research)")
+    p_audit.add_argument("--app", default=None, metavar="MODULE:ATTR",
+                         help="your compiled graph, or a factory returning one "
+                              "(overrides --example)")
+    p_audit.add_argument("--build-graph", dest="build_graph", default=None, metavar="MODULE:ATTR",
+                         help="factory build_graph(disabled: frozenset) -> graph; "
+                              "unlocks the ablation proof")
+    p_audit.add_argument("--cases", default=None, metavar="PATH",
+                         help="JSONL file, one graph input per line (required with --app)")
+    p_audit.add_argument("--output-key", dest="output_key", default=None, metavar="FIELD",
+                         help="state field holding the final answer; without it ablation "
+                              "diffs the whole state and biases toward KEEP")
+    p_audit.add_argument("--node-tools", dest="node_tools", default=None, metavar="PATH",
+                         help='JSON file mapping {"node": ["tool", ...]}; only needed for '
+                              "tools your framework does not report")
+    p_audit.add_argument("--name", default=None, help="graph name for the report and filenames")
+    p_audit.add_argument("--runs-per-month", dest="runs_per_month", type=int, default=None,
+                         metavar="N",
+                         help="your production traffic, to project a monthly cost. Without "
+                              "it the report stays in dollars per 1,000 runs — Warrant "
+                              "never invents a volume.")
     p_audit.set_defaults(func=cmd_audit)
 
     p_scan = sub.add_parser(

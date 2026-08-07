@@ -15,13 +15,24 @@ from warrant.trace.store import TraceStore
 class _FakeMessage:
     """Stands in for a LangChain AIMessage carrying real usage metadata."""
 
-    def __init__(self, content: str, total_tokens: int) -> None:
+    def __init__(self, content: str, total_tokens: int, model: str | None = None) -> None:
         self.content = content
         self.usage_metadata = {
             "input_tokens": total_tokens // 2,
             "output_tokens": total_tokens - total_tokens // 2,
             "total_tokens": total_tokens,
         }
+        self.response_metadata = {"model_name": model} if model else {}
+
+
+class _FakeToolMessage:
+    """Stands in for a LangChain ToolMessage — proof a tool actually ran."""
+
+    type = "tool"
+
+    def __init__(self, name: str, content: str = "") -> None:
+        self.name = name
+        self.content = content
 
 lg = pytest.importorskip("langgraph.graph")
 
@@ -85,15 +96,40 @@ def test_adapter_records_nodes_and_tools() -> None:
 def test_extract_usage_reads_real_metadata() -> None:
     # Nested in a messages list, as LangGraph state typically carries them.
     update = {"messages": [_FakeMessage("hi", 120), _FakeMessage("there", 30)]}
-    total, found = _extract_usage(update)
-    assert (total, found) == (150, True)
+    usage = _extract_usage(update)
+    assert (usage.total, usage.found) == (150, True)
+    # The input/output split survives, so cost can bill each side at its own rate.
+    assert (usage.prompt, usage.completion) == (60 + 15, 60 + 15)
 
     # A summed input/output with no total_tokens still resolves.
     partial = type("M", (), {"usage_metadata": {"input_tokens": 10, "output_tokens": 7}})()
-    assert _extract_usage({"m": partial}) == (17, True)
+    assert _extract_usage({"m": partial}).total == 17
 
     # Nothing measurable -> caller must fall back to estimation.
-    assert _extract_usage({"text": "no usage here"}) == (0, False)
+    empty = _extract_usage({"text": "no usage here"})
+    assert (empty.total, empty.found) == (0, False)
+
+
+def test_extract_usage_reads_the_model_that_billed_it() -> None:
+    """The model name rides along, so nodes aren't all priced at one default."""
+    usage = _extract_usage({"messages": [_FakeMessage("hi", 100, model="gpt-4o")]})
+    assert usage.model == "gpt-4o"
+    assert usage.mixed_models is False
+
+    # Two models in one node: attribute to the bigger spender and say it's mixed.
+    mixed = _extract_usage(
+        {
+            "messages": [
+                _FakeMessage("cheap", 10, model="gpt-4o-mini"),
+                _FakeMessage("dear", 900, model="claude-opus-5"),
+            ]
+        }
+    )
+    assert mixed.model == "claude-opus-5"
+    assert mixed.mixed_models is True
+
+    # No metadata at all -> None, never a guess.
+    assert _extract_usage({"messages": [_FakeMessage("anon", 50)]}).model is None
 
 
 def test_extract_usage_counts_echoed_message_once() -> None:
@@ -101,8 +137,9 @@ def test_extract_usage_counts_echoed_message_once() -> None:
     # (message-list state without a reducer) is attributed only to the first.
     m = _FakeMessage("shared", 500)
     seen: set[int] = set()
-    assert _extract_usage({"messages": [m]}, seen) == (500, True)
-    assert _extract_usage({"messages": [m, _FakeMessage("new", 40)]}, seen) == (40, True)
+    assert _extract_usage({"messages": [m]}, seen).total == 500
+    second = _extract_usage({"messages": [m, _FakeMessage("new", 40)]}, seen)
+    assert (second.total, second.found) == (40, True)
 
 
 def test_adapter_uses_measured_tokens_when_available() -> None:
@@ -258,7 +295,7 @@ def test_async_ablation_discriminates_from_running_loop() -> None:
     assert by_id["writer"].ablation_value == 1.0        # load-bearing -> KEEP
     assert by_id["reviewer"].ablation_value == 0.0       # redundant   -> COLLAPSE
     assert by_id["reviewer"].recommendation.value == "COLLAPSE"
-    assert report.projected_savings_per_month > 0
+    assert report.projected_savings_per_1k_runs > 0
 
 
 def test_invoke_runs_graph_once() -> None:

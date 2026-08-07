@@ -10,9 +10,12 @@ contract, so it degrades gracefully across versions and is trivially faked in
 tests (any object exposing ``.stream(input, config, stream_mode=...)`` and
 ``.invoke`` works).
 
-Tool attribution: a generic graph node is opaque about which tools it called,
-so the caller declares ``node_tools={node_id: [tool_name, ...]}``. Each tool
-name is resolved to a :class:`ToolRole` via, in order: an explicit
+Tool attribution has two sources, unioned. Tool activity LangChain actually
+reports — ``ToolMessage`` results and ``AIMessage.tool_calls`` in the streamed
+update — is *observed*, so a standard tool-calling graph needs no annotation at
+all. Anything the framework doesn't surface (a node that calls an API directly)
+is *declared* by the caller as ``node_tools={node_id: [tool_name, ...]}``. Each
+tool name is resolved to a :class:`ToolRole` via, in order: an explicit
 ``warrant.tool_tag``, the process tool ``REGISTRY``, then a name heuristic.
 
 Token counts come from LangChain's real ``usage_metadata`` when a node's output
@@ -20,7 +23,9 @@ carries it (the modern ``AIMessage`` field, or a legacy
 ``response_metadata['token_usage']``); only when no measurable usage is present
 does the adapter fall back to a length estimate. Each run is labelled
 ``tokens=measured`` / ``mixed`` / ``estimated`` accordingly, so no analyzer — and
-no dollar figure — mistakes an estimate for a measurement.
+no dollar figure — mistakes an estimate for a measurement. The model name is read
+off the same message, so each node is priced at the model it actually called
+rather than one configured default.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import asyncio
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from math import ceil
 from typing import Any, Callable, Mapping
 
@@ -54,13 +60,60 @@ def _estimate_tokens(text: str) -> int:
     return ceil(len(text) / 4) if text else 0
 
 
-def _extract_usage(value: Any, seen: set[int] | None = None) -> tuple[int, bool]:
+@dataclass
+class Usage:
+    """Real token usage found in a node update, with the model that billed it."""
+
+    total: int = 0
+    prompt: int = 0
+    completion: int = 0
+    found: bool = False
+    model: str | None = None
+    mixed_models: bool = False
+
+
+# Where LangChain providers put the model name on a response. OpenAI writes
+# ``model_name``, Anthropic ``model``; LangSmith adds ``ls_model_name``.
+_MODEL_KEYS = ("model_name", "model", "ls_model_name")
+
+
+def _usage_parts(meta: Any) -> tuple[int, int, int] | None:
+    """Return ``(total, prompt, completion)`` from a usage mapping, or None."""
+    if not isinstance(meta, Mapping):
+        return None
+    prompt = meta.get("input_tokens")
+    if prompt is None:
+        prompt = meta.get("prompt_tokens")
+    completion = meta.get("output_tokens")
+    if completion is None:
+        completion = meta.get("completion_tokens")
+    total = meta.get("total_tokens")
+    if total is None:
+        if prompt is None and completion is None:
+            return None
+        total = int(prompt or 0) + int(completion or 0)
+    return int(total), int(prompt or 0), int(completion or 0)
+
+
+def _model_name(obj: Any) -> str | None:
+    """Read the model that produced a message, when the framework reports it."""
+    rm = getattr(obj, "response_metadata", None)
+    if isinstance(rm, Mapping):
+        for key in _MODEL_KEYS:
+            value = rm.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _extract_usage(value: Any, seen: set[int] | None = None) -> Usage:
     """Sum real LLM token usage in a node update, if the framework exposes it.
 
     Walks the update for LangChain message-like objects carrying real usage:
     the modern ``AIMessage.usage_metadata`` (``{"input_tokens", "output_tokens",
-    "total_tokens"}``) or a legacy ``response_metadata["token_usage"]``. Returns
-    ``(total_tokens, found)``; ``found`` is False when nothing measurable is
+    "total_tokens"}``) or a legacy ``response_metadata["token_usage"]``, and reads
+    the model name off the same message so cost can be priced per node instead of
+    against one global default. ``found`` is False when nothing measurable is
     present, so the caller falls back to the length estimate and the run is
     labelled honestly.
 
@@ -68,41 +121,35 @@ def _extract_usage(value: Any, seen: set[int] | None = None) -> tuple[int, bool]
     node's state (e.g. message-list state without an ``add_messages`` reducer) is
     counted once, at the node that produced it — not re-attributed downstream.
     """
-    total = 0
-    found = False
+    usage = Usage()
     counted: set[int] = seen if seen is not None else set()  # usage objects already tallied
     local: set[int] = set()  # per-call cycle guard on containers (ids get recycled across calls)
-
-    def _usage_total(meta: Any) -> int | None:
-        if isinstance(meta, Mapping):
-            tokens = meta.get("total_tokens")
-            if tokens is None:
-                given = meta.get("input_tokens"), meta.get("output_tokens")
-                if any(t is not None for t in given):
-                    tokens = sum(int(t) for t in given if t is not None)
-            if tokens is not None:
-                return int(tokens)
-        return None
+    by_model: dict[str, int] = {}  # tokens per model, to pick the dominant one
 
     def walk(obj: Any) -> None:
-        nonlocal total, found
         oid = id(obj)
         if oid in local:
             return
         local.add(oid)
 
-        direct = _usage_total(getattr(obj, "usage_metadata", None))
-        if direct is None:
+        parts = _usage_parts(getattr(obj, "usage_metadata", None))
+        if parts is None:
             rm = getattr(obj, "response_metadata", None)
             if isinstance(rm, Mapping):
-                direct = _usage_total(rm.get("token_usage") or rm.get("usage"))
-        if direct is not None:
+                parts = _usage_parts(rm.get("token_usage") or rm.get("usage"))
+        if parts is not None:
             # Usage is present, so this update is measured — but only add tokens
             # the first time we see this specific message (echoes count once).
-            found = True
+            usage.found = True
             if oid not in counted:
                 counted.add(oid)
-                total += direct
+                total, prompt, completion = parts
+                usage.total += total
+                usage.prompt += prompt
+                usage.completion += completion
+                model = _model_name(obj)
+                if model:
+                    by_model[model] = by_model.get(model, 0) + total
             return  # counted this message; don't recurse into its fields
 
         if isinstance(obj, Mapping):
@@ -113,7 +160,59 @@ def _extract_usage(value: Any, seen: set[int] | None = None) -> tuple[int, bool]
                 walk(v)
 
     walk(value)
-    return total, found
+    if by_model:
+        # Several models in one node is legal; attribute to the one that spent the
+        # most tokens and flag it so the report can say the figure is approximate.
+        usage.model = max(by_model, key=lambda name: by_model[name])
+        usage.mixed_models = len(by_model) > 1
+    return usage
+
+
+def _observed_tools(value: Any, seen: set[int]) -> list[str]:
+    """Names of tools the framework reports this node actually invoked.
+
+    Reads what LangChain already puts in the streamed update — a ``ToolMessage``
+    (the tool ran and returned) or an ``AIMessage.tool_calls`` list (the model
+    asked for it) — so level-1 works at zero annotation instead of only trusting
+    what the caller declared. ``seen`` is shared across a run so a message echoed
+    into a later node's state is attributed once, to its producer.
+    """
+    names: list[str] = []
+    local: set[int] = set()
+
+    def add(name: Any) -> None:
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+
+    def walk(obj: Any) -> None:
+        oid = id(obj)
+        if oid in local:
+            return
+        local.add(oid)
+
+        if getattr(obj, "type", None) == "tool":       # ToolMessage: it ran
+            if oid not in seen:
+                seen.add(oid)
+                add(getattr(obj, "name", None))
+            return
+
+        calls = getattr(obj, "tool_calls", None)        # AIMessage: it asked
+        if isinstance(calls, (list, tuple)) and calls:
+            if oid not in seen:
+                seen.add(oid)
+                for call in calls:
+                    add(call.get("name") if isinstance(call, Mapping) else getattr(call, "name", None))
+            return
+
+        if isinstance(obj, Mapping):
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v)
+
+    walk(value)
+    return names
 
 
 def _stringify(value: Any) -> str:
@@ -156,6 +255,7 @@ class _StreamState:
         self.billable_nodes = 0  # nodes expected to bill a model (excludes pure tool nodes)
         self.node_count = 0
         self.usage_seen: set[int] = set()  # shared so echoed messages count once
+        self.tools_seen: set[int] = set()  # ditto for observed tool calls
 
 
 class InstrumentedApp:
@@ -196,9 +296,14 @@ class InstrumentedApp:
     def __getattr__(self, item: str) -> Any:  # pragma: no cover - trivial proxy
         return getattr(self._app, item)
 
-    def _tool_calls_for(self, node_id: str) -> list[ToolCallRecord]:
-        records: list[ToolCallRecord] = []
+    def _tool_calls_for(self, node_id: str, observed: list[str] | None = None) -> list[ToolCallRecord]:
+        """Tool records for one node: what was observed, plus what was declared."""
+        names: list[str] = list(observed or [])
         for name in self.node_tools.get(node_id, []):
+            if name not in names:
+                names.append(name)
+        records: list[ToolCallRecord] = []
+        for name in names:
             role = resolve_role(name, self.tool_tags)
             spec = REGISTRY.get(name) if REGISTRY.has(name) else None
             records.append(
@@ -235,8 +340,10 @@ class InstrumentedApp:
         state.prev = now
         for node_id, update in chunk.items():
             text = _stringify(update)
-            real_tokens, measured = _extract_usage(update, state.usage_seen)
-            tool_calls = self._tool_calls_for(node_id)
+            usage = _extract_usage(update, state.usage_seen)
+            tool_calls = self._tool_calls_for(
+                node_id, _observed_tools(update, state.tools_seen)
+            )
             state.node_count += 1
 
             # Attribute tokens honestly. A node that reports real usage is
@@ -245,8 +352,10 @@ class InstrumentedApp:
             # (never a phantom length estimate). Only a node with no usage *and*
             # no exogenous tool is presumed an unreported model call and estimated.
             is_tool_node = any(tc.exogenous for tc in tool_calls)
-            if measured:
-                token_source, tokens = "measured", real_tokens
+            prompt = completion = 0
+            if usage.found:
+                token_source, tokens = "measured", usage.total
+                prompt, completion = usage.prompt, usage.completion
                 state.measured_nodes += 1
                 state.billable_nodes += 1
             elif is_tool_node:
@@ -261,9 +370,13 @@ class InstrumentedApp:
                     tool_calls=tool_calls,
                     outcome=Outcome(
                         tokens=tokens,
+                        prompt_tokens=prompt,
+                        completion_tokens=completion,
                         latency_ms=latency_ms,
                         output_text=text,
                         token_source=token_source,
+                        model=usage.model,
+                        mixed_models=usage.mixed_models,
                     ),
                 )
             )

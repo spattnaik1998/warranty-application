@@ -70,9 +70,14 @@ def test_explicit_graph_report_keeps_injector_flags_candidates() -> None:
     assert verdicts["retriever"] is Recommendation.KEEP
     assert verdicts["analyze"] is Recommendation.REVIEW
     assert verdicts["reviewer"] is Recommendation.REVIEW
-    # A static scan never invents ablation values or dollar figures.
-    assert all(f.ablation_value is None and f.dollars_per_month == 0.0 for f in report.findings)
-    assert report.projected_savings_per_month == 0.0
+    # A static scan never invents ablation values or dollar figures — and it says
+    # cost is unavailable rather than reporting a measured-looking $0.00.
+    assert all(f.ablation_value is None for f in report.findings)
+    assert report.economics_available is False
+    assert all(f.dollars_per_month is None for f in report.findings)
+    assert "$" not in report.savings_sentence()
+    assert "$0.00" not in report.to_cli()
+    assert report.projected_savings_per_month is None
     assert any("STATIC scan" in n for n in report.notes)
 
 

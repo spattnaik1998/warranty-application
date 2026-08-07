@@ -37,58 +37,94 @@ point at *your own* graph.
 ```python
 import warrant
 
-# 1. Wrap your compiled graph. node_tools tells Warrant which tools each node
-#    calls; build_graph unlocks the ablation proof (optional but recommended).
+# 1. Wrap your compiled graph. build_graph unlocks the ablation proof;
+#    node_tools is only needed for tools your framework doesn't report itself.
 app = warrant.instrument(
     compiled_graph,
-    node_tools={"retriever": ["web_search"]},
     build_graph=build_graph,          # build_graph(disabled_nodes) -> compiled graph
     output_key="answer",
+    node_tools={"retriever": ["web_search"]},   # optional
 )
 
 # 2. Run it as usual.
 with warrant.session():
     for case in cases:
         app.invoke(case)
-    report = warrant.audit()
+    report = warrant.audit()          # add runs_per_month=N for a monthly figure
 
 # 3. Read the verdict.
 print(report.to_cli())
 report.to_html("out/audit.html")      # self-contained, shareable
 ```
 
+...or from the shell, with no harness to write:
+
+```bash
+warrant audit --app myapp.graph:build_graph \
+              --build-graph myapp.graph:build_graph \
+              --cases cases.jsonl --output-key answer
+```
+
+```
+node            verdict   class              ablation   nov      $/1k runs
+--------------------------------------------------------------------------
+retriever       KEEP      INJECTOR                  -  1.00           0.00
+writer          KEEP      REORGANIZER     1.00 (n=50)  0.34           3.90
+reviewer        COLLAPSE  REORGANIZER     0.00 (n=50)  0.04           1.42
+--------------------------------------------------------------------------
+Collapsing 1 redundant agent(s) saves $1.42 per 1,000 runs (27% of measured spend).
+```
+
 **The capability ladder** — value at zero annotation, sharper as you opt in:
 
 | Level | Signal | You provide |
 |------|--------|-------------|
-| 1 | Structural: flag nodes that call no exogenous tool | nothing |
+| 1 | Structural: flag nodes that call no exogenous tool | nothing — tool calls are observed |
 | 2 | **Ablation delegation-value + $ savings** (headline) | a `build_graph(disabled)` factory |
 | 3 | Output-novelty economics | an embeddings key (optional) |
 | 4 | Posterior-distortion + matched-condition ledger | `warrant.decision(...)` annotations |
 
 ### What Warrant needs from your graph
 
-Pointing Warrant at your own LangGraph app is three declarations — everything
-else is inferred:
-
-1. **`node_tools={node_id: [tool_name, ...]}`** — which tools each node calls.
-   A node that calls an *exogenous* tool (retrieval, web, DB, an API) is an
-   injector and is kept; a node that calls none is a reorganizer candidate. Tool
-   names Warrant doesn't recognize can be tagged explicitly with
-   `warrant.tool_tag("my_tool", "INJECTOR")`.
-2. **`build_graph(disabled: set[str]) -> compiled_graph`** — a factory that
+1. **`build_graph(disabled: set[str]) -> compiled_graph`** — a factory that
    recompiles your graph with named nodes omitted and edges relinked. This
    unlocks the headline ablation proof (re-run without a node; did the answer
    change?). Optional, but it's what turns a guess into a verdict.
-3. **`output_key="answer"`** — the single state field holding the final
-   deliverable. Ablation diffs it to decide whether a node mattered.
+2. **`output_key="answer"`** — the single state field holding the final
+   deliverable. Ablation diffs it to decide whether a node mattered. Without it
+   Warrant diffs the whole state, which biases every verdict toward KEEP — so it
+   says so in the report rather than letting you read a skewed table.
+3. **`node_tools={node_id: [tool_name, ...]}`** — *optional*. Warrant already
+   reads the tool activity LangChain reports (`ToolMessage`, `AIMessage.tool_calls`),
+   so a standard tool-calling graph needs no annotation. Declare only what the
+   framework can't see — a node that calls an API directly. Names Warrant doesn't
+   recognize can be tagged with `warrant.tool_tag("my_tool", "INJECTOR")`.
 
-**How cost is computed.** Warrant reads real per-response token usage
-(`usage_metadata` on LangChain messages, or any object exposing that field) and
-labels it `measured`. A node that makes no model call (pure retrieval/tool) is
-costed at **$0** — never a phantom length estimate. Only a node that ran a model
-*without* reporting usage is `estimated` (~4 chars/token), and the report names
-it so you know exactly what to instrument. Verdicts never depend on cost.
+### How the numbers are computed
+
+Warrant's whole value is that you can quote its figures without being embarrassed,
+so each one names its own evidence:
+
+- **Tokens.** Real per-response usage (`usage_metadata` on LangChain messages, or
+  any object exposing it) is labelled `measured`. A node that makes no model call
+  (pure retrieval/tool) is costed at **$0** — never a phantom length estimate.
+  Only a node that ran a model *without* reporting usage is `estimated`
+  (~4 chars/token), and the report names it so you know what to instrument.
+- **Price.** Each node is priced at **the model it actually called**, read from the
+  trace, with input and output tokens billed at their own rates. A node whose model
+  the framework never reported falls back to `WARRANT_WORKER_MODEL` — and the
+  report names those nodes too, because that figure could be off by 30×.
+- **Volume.** The headline is **dollars per 1,000 runs**, which follows from
+  measured tokens and assumes nothing. Pass `--runs-per-month N` (or
+  `warrant.audit(runs_per_month=N)`) and you get a monthly projection, always
+  labelled *declared* — Warrant does not know how often your graph runs and will
+  not pretend to.
+- **Confidence.** Scored from the evidence, not asserted. A COLLAPSE verdict after
+  *n* clean replays is bounded by the rule of three (≈ 3/n), so one run reads as
+  ~20% and fifty reads as ~94%. `n` appears next to every ablation value.
+- **Determinism.** Before ablating anything, Warrant replays your inputs with
+  *nothing* disabled. If the graph doesn't reproduce its own output, every diff is
+  noise — so it says so and caps confidence instead of reporting a verdict.
 
 ### Scan a GitHub repo without running it (static audit)
 
@@ -111,8 +147,9 @@ for report in warrant.scan("owner/repo"):   # one report per graph found
 
 This is the **level-1 (structural) audit, statically**: it names what to look at
 and writes a self-contained HTML report, but it deliberately shows **no ablation
-value and no dollar figure** — neither can be measured without running the graph,
-and Warrant never fabricates a number it hasn't measured. A node flagged as a
+value and no dollar figure at all** — not even `$0.00`, which would read as a
+measured zero. Neither can be measured without running the graph, and Warrant
+never fabricates a number it hasn't measured. A node flagged as a
 *candidate* is proven (and priced) by wrapping the live graph with
 `warrant.instrument(build_graph=...)` and running `warrant.audit()`. Detection of
 exogenous tools is keyword-based and errs toward under-claiming, and graphs
@@ -122,9 +159,10 @@ than guessed at.
 Try it without your own graph:
 
 ```bash
-pip install -e ".[dev]"
+pip install warrant                  # or: pip install -e ".[dev]" from a checkout
 warrant audit --example research     # a graph with a deliberately redundant reviewer
 warrant audit --example dogfood      # audits Warrant's own briefing pipeline
+warrant audit --example research --runs-per-month 30000   # priced at your volume
 ```
 
 The `research` audit names the redundant `reviewer` node COLLAPSE (ablation
@@ -196,9 +234,10 @@ warrant/
   orchestrator/   graph.py executor.py escalation.py  LangGraph two-move loop (reference impl)
   pipeline/       steps.py brief_pipeline.py     the AI-paper -> briefing domain (dogfood target)
   ledger/         probe.py metrics.py report.py  matched conditions + reproduced plots
-  app/            cli.py api.py                   CLI (audit / brief / probe) + FastAPI
+  app/            cli.py api.py                   CLI (audit / scan / brief / probe) + FastAPI
+  examples/       research_graph dogfood_brief_graph   packaged demo graphs
   tests/                                          contract, adapter, audit, dogfood, gate, ...
-examples/         research_graph + dogfood_brief_graph + runners
+examples/         runnable scripts driving the packaged graphs (repo only)
 ```
 
 The **Trace Contract** (`warrant/trace/contract.py`) is the single seam:
@@ -262,8 +301,21 @@ reliability engineering those papers prescribe.
 ## Testing
 
 ```bash
-python -m pytest -q      # 24 tests: posterior math, gate classification, distortion, smoke + ledger acceptance
+python -m pytest -q      # 87 tests
+ruff check .
 ```
 
-The smoke tests assert the ledger's acceptance criteria: governed ≈ centralized,
-naive < governed, signal-starved < governed, and r > 0.5.
+Covering posterior math, gate classification, distortion, the adapter (sync and
+async), the audit's economics and confidence, report rendering, the CLI, config
+validation, and the static scanner.
+
+Two families are load-bearing. The ledger smoke tests assert its acceptance
+criteria — governed ≈ centralized, naive < governed, signal-starved < governed,
+r > 0.5. The guard tests (`test_audit_guards.py`) assert the audit *refuses* to
+sound confident without evidence: no declared or observed tools, no `output_key`,
+or a graph that can't reproduce itself each produce a note and a capped
+confidence rather than a clean-looking verdict.
+
+CI runs both on 3.11 and 3.12, plus an install job that builds the wheel and runs
+`warrant audit` from outside the source tree — the check that keeps the headline
+command working for someone who only ran `pip install`.

@@ -11,7 +11,7 @@ keeping the load-bearing ``writer``. Renders a self-contained HTML report to
 from __future__ import annotations
 
 import warrant
-from examples.research_graph import NODE_TOOLS, build_research_graph
+from warrant.examples.research_graph import NODE_TOOLS, build_research_graph
 
 TOPICS = ["kv-cache compression", "mixture-of-experts routing", "speculative decoding"]
 

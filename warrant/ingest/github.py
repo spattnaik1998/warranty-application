@@ -8,6 +8,7 @@ text is read — never secrets, never execution.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tempfile
@@ -80,8 +81,12 @@ def resolve_target(target: str, ref: str | None = None) -> RepoRef:
         cmd += ["--branch", ref]
     cmd += [url, str(tmp)]
     log_event(log, "cloning repo", stage="ingest", url=url, status="start")
+    # Never let git block on a credential prompt: stdout/stderr are captured, so a
+    # prompt would be invisible and look like a 180-second hang. A private or
+    # missing repo must fail fast with git's own message instead.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GCM_INTERACTIVE": "never"}
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
     except FileNotFoundError as exc:  # git not installed
         raise RuntimeError("git is required to scan a GitHub repo but was not found.") from exc
     except subprocess.TimeoutExpired as exc:

@@ -347,8 +347,10 @@ def _static_finding(node: StaticNode) -> NodeFinding:
 def build_static_report(graph: StaticGraph, source_label: str = "") -> AuditReport:
     """Turn a reconstructed :class:`StaticGraph` into an :class:`AuditReport`.
 
-    All economic fields are zero and every ablation value is absent by design —
-    a static scan measures structure, not cost or delegation value.
+    ``economics_available`` is False and every ablation value is absent by design
+    — a static scan measures structure, not cost or delegation value. Renderers
+    then omit the money entirely rather than printing ``$0.00``, which would read
+    as a measured zero instead of an unmeasurable one.
     """
     findings = [_static_finding(n) for n in graph.nodes.values()]
     name = f"{source_label}:{graph.name}" if source_label else graph.name
@@ -358,6 +360,7 @@ def build_static_report(graph: StaticGraph, source_label: str = "") -> AuditRepo
             graph_name=name,
             n_runs=0,
             findings=[],
+            economics_available=False,
             notes=[
                 "This graph is assembled dynamically (nodes added via a loop or dispatch "
                 "table), so its real nodes cannot be reconstructed from source alone. "
@@ -381,13 +384,18 @@ def build_static_report(graph: StaticGraph, source_label: str = "") -> AuditRepo
             "Some node functions were defined outside the scanned files and could not "
             "be classified — include their source for a complete map."
         )
+    if graph.dynamic:
+        notes.append(
+            "Part of this graph is assembled dynamically (nodes added via a loop or "
+            "dispatch table), so the node list below is partial — treat it as a lower "
+            "bound, not a complete map."
+        )
     return AuditReport(
         graph_name=name,
         n_runs=0,
         findings=findings,
         total_tokens=0,
-        total_dollars_per_month=0.0,
-        projected_savings_per_month=0.0,
+        economics_available=False,
         notes=notes,
     )
 

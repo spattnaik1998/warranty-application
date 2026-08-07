@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from warrant.schemas.belief import AdmissibilityClass
+from warrant.tools.registry import ToolRole
 from warrant.trace.contract import RunTrace
 
 
@@ -22,15 +23,20 @@ class NodeStructure:
     node_id: str
     runs: int = 0
     exogenous_runs: int = 0
+    injector_runs: int = 0
+    validator_runs: int = 0
     tool_names: set[str] = field(default_factory=set)
 
     @property
     def admissibility(self) -> AdmissibilityClass:
         # A node counts as exogenous if it ever injected signal; reorganizer only
-        # if it *never* did across observed runs.
-        if self.exogenous_runs == 0:
-            return AdmissibilityClass.REORGANIZER
-        return AdmissibilityClass.INJECTOR
+        # if it *never* did across observed runs. Injecting outranks validating,
+        # matching ``gate/admissibility.py``'s precedence.
+        if self.injector_runs:
+            return AdmissibilityClass.INJECTOR
+        if self.validator_runs:
+            return AdmissibilityClass.VALIDATOR
+        return AdmissibilityClass.REORGANIZER
 
     @property
     def is_reorganizer(self) -> bool:
@@ -47,8 +53,13 @@ def structural_audit(traces: list[RunTrace]) -> dict[str, NodeStructure]:
         for node in trace.nodes:
             struct = out.setdefault(node.node_id, NodeStructure(node_id=node.node_id))
             struct.runs += 1
+            roles = {tc.role for tc in node.tool_calls if tc.exogenous}
             if node.has_exogenous_tool:
                 struct.exogenous_runs += 1
+            if ToolRole.INJECTOR in roles:
+                struct.injector_runs += 1
+            elif ToolRole.VALIDATOR in roles:
+                struct.validator_runs += 1
             struct.tool_names.update(node.tool_names)
     return out
 
